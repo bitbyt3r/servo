@@ -10,14 +10,15 @@ use std::sync::Arc;
 use std::{mem, thread};
 
 use imsz::imsz_from_reader;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use mime::Mime;
 use net_traits::image_cache::{
-    Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback, ImageCacheResponseMessage,
-    ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
-    RasterizationCompleteResponse, VectorImage,
+    ExternalImage as NetExternalImage, Image, ImageCache, ImageCacheFactory,
+    ImageCacheResponseCallback, ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener,
+    ImageOrMetadataAvailable, ImageResponse, PendingImageId, RasterizationCompleteResponse,
+    VectorImage,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
@@ -35,6 +36,25 @@ use servo_config::pref;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
+use webrender_api::{
+    ExternalImageData, ExternalImageId, ExternalImageType, ImageBufferKind, ImageDescriptor,
+    ImageDescriptorFlags, ImageFormat as WebRenderImageFormat,
+};
+
+/// `bops-render` extension MIME type. Responses with this Content-Type are
+/// expected to carry a 12-byte body: a little-endian
+/// `(u32 external_id, u32 width_px, u32 height_px)` triple. The decode path
+/// short-circuits the normal raster/vector decoders and emits a WebRender
+/// external-image registration instead — pixels are owned by the embedder
+/// and supplied at composite time via WebRender's `ExternalImageHandler`.
+/// See `crates/renderer/src/scheme/response.rs` in `bops-render` for the
+/// producer side. Keep this in sync with that constant.
+const BOPS_EXTERNAL_MIME_TYPE: &str = "image/x-bops-external";
+
+/// Length of the `image/x-bops-external` body. Three little-endian `u32`s:
+/// `external_id ++ width_px ++ height_px`. Mismatched length is a hard
+/// decode failure.
+const BOPS_EXTERNAL_BODY_LEN: usize = 12;
 
 // We bake in rippy.png as a fallback, in case the embedder does not provide a broken
 // image icon resource. This version is 229 bytes, so don't exchange it against
@@ -96,15 +116,23 @@ fn decode_bytes_sync(
     content_type: Option<Mime>,
     fontdb: Arc<fontdb::Database>,
 ) -> DecoderMsg {
-    let is_svg_document = content_type.is_some_and(|content_type| {
+    let is_svg_document = content_type.as_ref().is_some_and(|content_type| {
         (
             content_type.type_(),
             content_type.subtype(),
             content_type.suffix(),
         ) == (mime::IMAGE, mime::SVG, Some(mime::XML))
     });
+    // `bops-render` extension. Match by full essence (`type/subtype` without
+    // parameters) so a `Content-Type: image/x-bops-external; charset=utf-8`
+    // — which would be technically wrong but tolerable — still routes here.
+    let is_bops_external = content_type.as_ref().is_some_and(|ct| {
+        ct.essence_str().eq_ignore_ascii_case(BOPS_EXTERNAL_MIME_TYPE)
+    });
 
-    let image = if is_svg_document {
+    let image = if is_bops_external {
+        decode_bops_external_body(bytes, cors)
+    } else if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb)
             .ok()
             .map(|svg_tree| {
@@ -118,6 +146,52 @@ fn decode_bytes_sync(
     };
 
     DecoderMsg { key, image }
+}
+
+/// Parse the 12-byte `image/x-bops-external` body into a [`DecodedImage::External`].
+///
+/// Body layout (little-endian, packed):
+/// ```text
+/// 0..4  : u32 external_id   — passed verbatim to ExternalImageHandler
+/// 4..8  : u32 width_px      — natural image width
+/// 8..12 : u32 height_px     — natural image height
+/// ```
+///
+/// Returns `None` on length mismatch or zero dimensions; the caller treats
+/// `None` as a failed decode and the page renders a broken-image icon.
+fn decode_bops_external_body(bytes: &[u8], cors: CorsStatus) -> Option<DecodedImage> {
+    if bytes.len() != BOPS_EXTERNAL_BODY_LEN {
+        warn!(
+            "image/x-bops-external: body length {} != expected {}",
+            bytes.len(),
+            BOPS_EXTERNAL_BODY_LEN
+        );
+        return None;
+    }
+    let id = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let width = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let height = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    if width == 0 || height == 0 {
+        warn!("image/x-bops-external: refusing zero-dimensional image (id={id})");
+        return None;
+    }
+    Some(DecodedImage::External(BopsExternalDecoded {
+        external_id: id,
+        width,
+        height,
+        cors_status: cors,
+    }))
+}
+
+/// Intermediate decoder output for `image/x-bops-external`. Stays inside
+/// `image_cache` until [`ImageCacheStore::handle_decoder`] turns it into a
+/// WebRender image-key registration plus a [`NetExternalImage`].
+#[derive(Debug)]
+struct BopsExternalDecoded {
+    external_id: u32,
+    width: u32,
+    height: u32,
+    cors_status: CorsStatus,
 }
 
 fn set_webrender_image_key(
@@ -256,6 +330,12 @@ impl std::fmt::Debug for VectorImageData {
 enum DecodedImage {
     Raster(RasterImage),
     Vector(VectorImageData),
+    /// `bops-render` extension. The decoder peeled a 12-byte
+    /// `image/x-bops-external` body and we still need to allocate a
+    /// WebRender image key + register against the embedder's external image
+    /// handler in [`ImageCacheStore::handle_decoder`] before we can hand
+    /// the loaded image off to listeners.
+    External(BopsExternalDecoded),
 }
 
 /// Message that the decoder worker threads send to the image cache.
@@ -321,6 +401,11 @@ impl LoadKeyGenerator {
 enum LoadResult {
     LoadedRasterImage(RasterImage),
     LoadedVectorImage(VectorImageData),
+    /// `bops-render` extension. The external image was registered with the
+    /// paint API at `handle_decoder` time; this carries the resulting
+    /// [`NetExternalImage`] (which embeds the WebRender image key plus
+    /// metadata) over to `complete_load` for storage and listener fan-out.
+    LoadedExternalImage(NetExternalImage),
     FailedToLoadOrDecode,
 }
 
@@ -622,6 +707,12 @@ impl ImageCacheStore {
                 };
                 ImageResponse::Loaded(Image::Vector(vector_image), url.unwrap())
             },
+            LoadResult::LoadedExternalImage(external_image) => {
+                // The image key is already registered with the paint API in
+                // `register_bops_external`; we just publish the resulting
+                // `Image::External` to listeners.
+                ImageResponse::Loaded(Image::External(external_image), url.unwrap())
+            },
             LoadResult::FailedToLoadOrDecode => ImageResponse::FailedToLoadOrDecode,
         };
 
@@ -650,13 +741,29 @@ impl ImageCacheStore {
             self.completed_loads
                 .remove(&(url.clone(), origin.clone(), *cors_setting))
         {
-            if let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response {
-                if image.id.is_some() {
+            match loaded_image.image_response {
+                ImageResponse::Loaded(Image::Raster(image), _) => {
+                    if let Some(id) = image.id {
+                        self.paint_api.update_images(
+                            self.webview_id.into(),
+                            vec![ImageUpdate::DeleteImage(id)].into(),
+                        );
+                    }
+                },
+                // `bops-render` extension. The external-image registration
+                // we made in `register_bops_external` needs to be torn down
+                // symmetrically — otherwise WebRender keeps an orphan key
+                // that resolves to an `ExternalImageHandler::lock` for an
+                // image the embedder no longer guarantees.
+                ImageResponse::Loaded(Image::External(image), _) => {
                     self.paint_api.update_images(
                         self.webview_id.into(),
-                        vec![ImageUpdate::DeleteImage(image.id.unwrap())].into(),
+                        vec![ImageUpdate::DeleteImage(image.id)].into(),
                     );
-                }
+                },
+                ImageResponse::Loaded(Image::Vector(_), _)
+                | ImageResponse::MetadataLoaded(_)
+                | ImageResponse::FailedToLoadOrDecode => {},
             }
         }
     }
@@ -713,8 +820,70 @@ impl ImageCacheStore {
             Some(DecodedImage::Vector(vector_image_data)) => {
                 LoadResult::LoadedVectorImage(vector_image_data)
             },
+            Some(DecodedImage::External(decoded)) => {
+                self.register_bops_external(decoded)
+            },
         };
         self.complete_load(msg.key, image);
+    }
+
+    /// `bops-render` extension. Allocate a WebRender image key, register
+    /// the external-image descriptor against `paint_api`, and return a
+    /// [`LoadResult::LoadedExternalImage`] that `complete_load` can wrap in
+    /// an `Image::External`.
+    ///
+    /// The `ExternalImageType::TextureHandle(Texture2D)` choice matches the
+    /// embedder's promise: the image is a GPU-resident BGRA8 texture
+    /// (IOSurface on macOS, DMABUF on Linux, DXGI on Windows). The
+    /// embedder's `ExternalImageHandler::lock(id, ...)` call resolves to a
+    /// concrete texture handle at WebRender composite time. With Servo's
+    /// `SoftwareRenderingContext` (the default through `bops-render`'s
+    /// Stage 7) WebRender's compositor can't honour external textures and
+    /// the painted region will be blank — that's expected, the GPU
+    /// rendering path lands in `bops-render` Stage 9.
+    fn register_bops_external(&mut self, decoded: BopsExternalDecoded) -> LoadResult {
+        // The blocking allocator can fail if the paint API is shutting down
+        // or out of namespace ids; treat that as a decode failure rather
+        // than panicking. The page renders a broken-image icon — same as
+        // any other allocation/decode failure.
+        let Some(image_key) = self.paint_api.generate_image_key_blocking(self.webview_id) else {
+            warn!(
+                "image/x-bops-external: generate_image_key_blocking failed for external_id={}",
+                decoded.external_id
+            );
+            return LoadResult::FailedToLoadOrDecode;
+        };
+        info!(
+            target: "net::image_cache::bops",
+            "image/x-bops-external: registered external_id={} ({}x{}) as ImageKey={:?}",
+            decoded.external_id, decoded.width, decoded.height, image_key
+        );
+        let descriptor = ImageDescriptor::new(
+            decoded.width as i32,
+            decoded.height as i32,
+            WebRenderImageFormat::BGRA8,
+            ImageDescriptorFlags::IS_OPAQUE,
+        );
+        let external_data = ExternalImageData {
+            id: ExternalImageId(decoded.external_id as u64),
+            channel_index: 0,
+            image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+            normalized_uvs: false,
+        };
+        self.paint_api.add_image(
+            image_key,
+            descriptor,
+            SerializableImageData::External(external_data),
+            false, // not animated; embedder updates by re-RegisterImage'ing.
+        );
+        LoadResult::LoadedExternalImage(NetExternalImage {
+            id: image_key,
+            metadata: ImageMetadata {
+                width: decoded.width,
+                height: decoded.height,
+            },
+            cors_status: decoded.cors_status,
+        })
     }
 }
 

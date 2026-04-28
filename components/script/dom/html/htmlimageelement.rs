@@ -91,6 +91,14 @@ use crate::script_thread::ScriptThread;
 /// Supported image MIME types as defined by
 /// <https://mimesniff.spec.whatwg.org/#image-mime-type>.
 /// Keep this in sync with 'detect_image_format' from components/pixels/lib.rs
+///
+/// `image/x-bops-external` is a `bops-render` extension (downstream patch on
+/// the `bops-render` branch). The body is a 4-byte little-endian
+/// `ExternalImageId` rather than encoded pixels; the embedder's custom URL
+/// scheme handlers (`decklink://`, `pearl://`, `vram://`) return it, and the
+/// image cache decodes it into a WebRender external-image display item that
+/// references a GPU texture provided by the embedder's `ExternalImageHandler`.
+/// See `components/net/image_cache.rs::decode_bytes_sync` for the decode path.
 const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/bmp",
     "image/gif",
@@ -104,6 +112,8 @@ const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/vnd.microsoft.icon",
     "image/x-icon",
     "image/webp",
+    // bops-render extension (downstream patch).
+    "image/x-bops-external",
 ];
 
 #[derive(Clone, Copy, Debug)]
