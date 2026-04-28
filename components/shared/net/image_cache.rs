@@ -25,13 +25,22 @@ use crate::request::CorsSettings;
 
 pub type VectorImageId = PendingImageId;
 
-// Represents either a raster image for which the pixel data is available
-// or a vector image for which only the natural dimensions are available
-// and thus requires a further rasterization step to render.
+// Represents either a raster image for which the pixel data is available,
+// a vector image for which only the natural dimensions are available
+// (and thus requires a further rasterization step to render), or an external
+// image — a `bops-render` extension whose pixel data lives outside Servo and
+// is provided by the embedder via WebRender's `ExternalImageHandler` at
+// composite time.
 #[derive(Clone, Debug, MallocSizeOf)]
 pub enum Image {
     Raster(#[conditional_malloc_size_of] Arc<RasterImage>),
     Vector(VectorImage),
+    /// `bops-render` extension. Body of an `image/x-bops-external` response
+    /// is decoded into one of these by `image_cache::decode_bytes_sync`.
+    /// `id` is the WebRender image key that was registered against the
+    /// embedder's external-image handler at decode time; layout reads it
+    /// directly when emitting display items.
+    External(ExternalImage),
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -42,11 +51,24 @@ pub struct VectorImage {
     pub cors_status: CorsStatus,
 }
 
+/// `bops-render` extension. Mirrors [`VectorImage`]'s shape but `id` is a
+/// WebRender [`ImageKey`] rather than a [`PendingImageId`]; the underlying
+/// pixel data is GPU-resident and produced by the embedder's
+/// `ExternalImageHandler` at composite time, so no rasterization step is
+/// needed.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct ExternalImage {
+    pub id: ImageKey,
+    pub metadata: ImageMetadata,
+    pub cors_status: CorsStatus,
+}
+
 impl Image {
     pub fn metadata(&self) -> ImageMetadata {
         match self {
             Image::Vector(image, ..) => image.metadata,
             Image::Raster(image) => image.metadata,
+            Image::External(image) => image.metadata,
         }
     }
 
@@ -54,13 +76,14 @@ impl Image {
         match self {
             Image::Vector(image) => image.cors_status,
             Image::Raster(image) => image.cors_status,
+            Image::External(image) => image.cors_status,
         }
     }
 
     pub fn as_raster_image(&self) -> Option<Arc<RasterImage>> {
         match self {
             Image::Raster(image) => Some(image.clone()),
-            Image::Vector(..) => None,
+            Image::Vector(..) | Image::External(..) => None,
         }
     }
 }

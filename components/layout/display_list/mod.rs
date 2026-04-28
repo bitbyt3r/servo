@@ -1532,6 +1532,9 @@ impl<'a> BuilderForBoxFragment<'a> {
                             })
                             .and_then(|rasterized_image| rasterized_image.id)
                         },
+                        // `bops-render` extension; image key was allocated at
+                        // `image_cache::register_bops_external` time.
+                        CachedImage::External(external_image) => Some(external_image.id),
                     };
 
                     let Some(image_key) = image_wr_key else {
@@ -1765,6 +1768,9 @@ impl<'a> BuilderForBoxFragment<'a> {
                         })
                         .and_then(|rasterized_image| rasterized_image.id)
                     },
+                    // `bops-render` extension; image key was allocated at
+                    // `image_cache::register_bops_external` time.
+                    CachedImage::External(external_image) => Some(external_image.id),
                 };
 
                 let Some(key) = image_key else {

@@ -509,6 +509,14 @@ impl ReplacedContents {
                             )
                             .and_then(|i| i.id)
                     },
+                    // `bops-render` extension. The WebRender image key was
+                    // already allocated and registered with the paint API
+                    // when the image cache decoded the
+                    // `image/x-bops-external` body — see
+                    // `components/net/image_cache.rs::register_bops_external`.
+                    // No rasterization step needed; layout just emits a
+                    // `push_image(image_key, ...)` display item against it.
+                    Image::External(external_image) => Some(external_image.id),
                 })
                 .map(|image_key| {
                     Fragment::Image(ArcRefCell::new(ImageFragment {

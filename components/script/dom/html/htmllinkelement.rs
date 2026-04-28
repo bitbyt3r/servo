@@ -895,6 +895,13 @@ impl HTMLLinkElement {
                     );
                 }
             },
+            // `bops-render` extension. External images aren't a meaningful
+            // favicon source (they're live GPU textures, not icon-PNG
+            // bytes), but the match must be exhaustive. Drop on the floor
+            // with a debug log; the favicon stays whatever it was.
+            Image::External(_) => {
+                debug!("favicon: ignoring image/x-bops-external response");
+            },
         }
     }
 
