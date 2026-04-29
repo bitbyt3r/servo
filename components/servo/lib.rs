@@ -44,9 +44,23 @@ pub use media::{
 // fleshed out public domains API if we want to expose it.
 pub use net_traits::pub_domains::is_reg_domain;
 pub use paint::WebRenderDebugOption;
+// `bops-render` extension. Re-export the trait + factory so embedders
+// can install a `WebRenderImageHandlerType::BopsAsset` handler via
+// `ServoBuilder::bops_asset_external_image_handler_factory(...)`.
+pub use paint::BopsAssetExternalImageHandlerFactory;
 pub use paint_api::rendering_context::{
     OffscreenRenderingContext, RenderingContext, SoftwareRenderingContext, WindowRenderingContext,
 };
+// `bops-render` extension. The `WebRenderExternalImageApi` trait is
+// what embedder-side `lock`/`unlock` callbacks implement;
+// `ExternalImageSource` is the source-type the lock returns
+// (`RawData(&[u8])` for our software path, since asset cache pixels
+// live in CPU memory). `Size2D` is needed for the size return value.
+pub use paint_api::{ExternalImageSource, WebRenderExternalImageApi};
+// Re-export `euclid` so embedders can spell the
+// `Size2D<i32>` (a.k.a. `UntypedSize2D<i32>`) return type of
+// `WebRenderExternalImageApi::lock` without taking a separate dep.
+pub use euclid;
 // This should be replaced with an API on ServoBuilder.
 // See <https://github.com/servo/servo/issues/40950>.
 pub use resources;

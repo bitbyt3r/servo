@@ -6,10 +6,11 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use embedder_traits::{EventLoopWaker, ShutdownState};
-use paint_api::{PaintMessage, PaintProxy};
+use paint_api::{PaintMessage, PaintProxy, WebRenderExternalImageApi};
 use profile_traits::{mem, time};
 use servo_base::generic_channel::RoutedReceiver;
 use servo_constellation_traits::EmbedderToConstellationMessage;
@@ -55,4 +56,22 @@ pub struct InitialPaintState {
     /// If WebXR is enabled, a [`WebXrRegistry`] to register WebXR threads.
     #[cfg(feature = "webxr")]
     pub webxr_registry: Box<dyn WebXrRegistry>,
+    /// `bops-render` extension. Optional embedder-supplied factory that
+    /// produces one [`WebRenderExternalImageApi`] handler per [`Painter`]
+    /// (each `Painter` owns its own [`WebRenderExternalImageHandlers`],
+    /// so the factory is invoked once per panel-rendering-context). The
+    /// factory returns a fresh boxed handler each call; typical
+    /// implementations wrap an `Arc<AssetCache>` (or equivalent state)
+    /// and route `lock(external_id)` to the cache's image entries.
+    /// `None` disables the extension; unknown external_ids then panic
+    /// in `WebRenderExternalImageHandlers::lock` as before.
+    pub bops_asset_external_image_handler_factory:
+        Option<Arc<dyn BopsAssetExternalImageHandlerFactory>>,
+}
+
+/// `bops-render` extension. Factory for [`WebRenderExternalImageApi`]
+/// handlers, called once per [`Painter`] construction. See
+/// [`InitialPaintState::bops_asset_external_image_handler_factory`].
+pub trait BopsAssetExternalImageHandlerFactory: Send + Sync {
+    fn make_handler(&self) -> Box<dyn WebRenderExternalImageApi>;
 }

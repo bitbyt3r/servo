@@ -589,6 +589,15 @@ pub enum WebRenderImageHandlerType {
     WebGl,
     Media,
     WebGpu,
+    /// `bops-render` extension. Embedder-supplied external images that
+    /// originate from the [`image/x-bops-external`] response handler in
+    /// `components/net/image_cache.rs`. The id_manager does NOT track
+    /// these — they're allocated by the embedder up front (broadcast
+    /// vision-mixer asset cache, decklink/pearl input bridges) and
+    /// passed verbatim through the 12-byte body. `WebRenderExternalImageHandlers::lock`
+    /// falls through to this handler when `id_manager.get(&key)` returns
+    /// `None`. Install via `set_handler(BopsAsset)` from the embedder.
+    BopsAsset,
 }
 
 /// List of WebRender external images to be shared among all external image
@@ -631,6 +640,14 @@ pub struct WebRenderExternalImageHandlers {
     media_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// WebGPU handler.
     webgpu_handler: Option<Box<dyn WebRenderExternalImageApi>>,
+    /// `bops-render` extension. Embedder-supplied handler for
+    /// [`WebRenderImageHandlerType::BopsAsset`]. Receives `lock`/`unlock`
+    /// for any [`ExternalImageId`] not present in `id_manager` —
+    /// typically asset-cache or capture-bridge ids registered through
+    /// the `image/x-bops-external` MIME path in `components/net/image_cache.rs`.
+    /// `None` for embedders that don't use the extension; in that case
+    /// unknown ids panic as before.
+    bops_asset_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// A [`WebRenderExternalImageIdManager`] responsible for creating new [`ExternalImageId`]s.
     /// This is shared with the WebGL, WebGPU, and hardware-accelerated media threads and
     /// all other instances of [`WebRenderExternalImageHandlers`] -- one per WebRender instance.
@@ -643,6 +660,7 @@ impl WebRenderExternalImageHandlers {
             webgl_handler: Default::default(),
             media_handler: Default::default(),
             webgpu_handler: Default::default(),
+            bops_asset_handler: Default::default(),
             id_manager,
         }
     }
@@ -660,6 +678,7 @@ impl WebRenderExternalImageHandlers {
             WebRenderImageHandlerType::WebGl => self.webgl_handler = Some(handler),
             WebRenderImageHandlerType::Media => self.media_handler = Some(handler),
             WebRenderImageHandlerType::WebGpu => self.webgpu_handler = Some(handler),
+            WebRenderImageHandlerType::BopsAsset => self.bops_asset_handler = Some(handler),
         }
     }
 }
@@ -675,10 +694,17 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
+        // `bops-render` extension: ids not in the id_manager fall
+        // through to the BopsAsset handler if installed (typically the
+        // asset cache or DeckLink / Pearl bridge in `bops-render`'s
+        // renderer crate). Without the extension, unknown ids panic
+        // as before — preserving the upstream invariant for embedders
+        // that don't opt in.
+        let handler_type = match self.id_manager().get(&key) {
+            Some(t) => t,
+            None if self.bops_asset_handler.is_some() => WebRenderImageHandlerType::BopsAsset,
+            None => panic!("Tried to get unknown external image"),
+        };
         match handler_type {
             WebRenderImageHandlerType::WebGl => {
                 let (source, size) = self.webgl_handler.as_mut().unwrap().lock(key.0);
@@ -709,21 +735,38 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
                     source,
                 }
             },
+            WebRenderImageHandlerType::BopsAsset => {
+                let (source, size) = self.bops_asset_handler.as_mut().unwrap().lock(key.0);
+                ExternalImage {
+                    // V-flipped UV for software RawData sources (see
+                    // upstream WebGL/Media arms above for the same
+                    // convention). The renderer's
+                    // `AssetCacheImageHandler` returns RGBA8 rows in
+                    // top-down order; WebRender expects bottom-up
+                    // when sampling for composite, so flip Y here.
+                    uv: TexelRect::new(0.0, size.height as f32, size.width as f32, 0.0),
+                    source,
+                }
+            },
         }
     }
 
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
+        let handler_type = match self.id_manager().get(&key) {
+            Some(t) => t,
+            None if self.bops_asset_handler.is_some() => WebRenderImageHandlerType::BopsAsset,
+            None => panic!("Tried to get unknown external image"),
+        };
         match handler_type {
             WebRenderImageHandlerType::WebGl => self.webgl_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::Media => self.media_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::WebGpu => {
                 self.webgpu_handler.as_mut().unwrap().unlock(key.0)
+            },
+            WebRenderImageHandlerType::BopsAsset => {
+                self.bops_asset_handler.as_mut().unwrap().unlock(key.0)
             },
         };
     }

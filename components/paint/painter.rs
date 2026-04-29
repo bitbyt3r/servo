@@ -179,6 +179,17 @@ impl Painter {
 
         WindowGLContext::initialize_image_handler(&mut external_image_handlers);
 
+        // `bops-render` extension. If the embedder installed a factory
+        // for [`WebRenderImageHandlerType::BopsAsset`], invoke it now
+        // and register the resulting handler. Each `Painter` gets its
+        // own handler instance — the factory typically wraps an
+        // `Arc<AssetCache>` (or equivalent) so all per-painter
+        // handlers share state without taking the same `&mut`.
+        if let Some(factory) = paint.bops_asset_external_image_handler_factory() {
+            let handler = factory.make_handler();
+            external_image_handlers.set_handler(handler, WebRenderImageHandlerType::BopsAsset);
+        }
+
         let embedder_to_constellation_sender = paint.embedder_to_constellation_sender.clone();
         let timer_refresh_driver = LazyCell::default();
         let refresh_driver = Rc::new(BaseRefreshDriver::new(

@@ -47,9 +47,11 @@ use webrender::{CaptureBits, MemoryReport};
 use webrender_api::units::{DevicePixel, DevicePoint};
 use webrender_api::{FontInstanceKey, FontKey, ImageKey};
 
-use crate::InitialPaintState;
+use std::sync::Arc;
+
 use crate::painter::Painter;
 use crate::webview_renderer::UnknownWebView;
+use crate::{BopsAssetExternalImageHandlerFactory, InitialPaintState};
 
 /// An option to control what kind of WebRender debugging is enabled while Servo is running.
 #[derive(Copy, Clone)]
@@ -135,6 +137,13 @@ pub struct Paint {
     /// An map of external images shared between all `WebGpuExternalImages`.
     #[cfg(feature = "webgpu")]
     webgpu_image_map: std::cell::OnceCell<WebGpuExternalImageMap>,
+
+    /// `bops-render` extension. Embedder-supplied factory used by
+    /// `Painter::new` to install a [`WebRenderImageHandlerType::BopsAsset`]
+    /// handler on each per-painter `WebRenderExternalImageHandlers`.
+    /// `None` for upstream / non-`bops-render` embedders.
+    pub(crate) bops_asset_external_image_handler_factory:
+        Option<Arc<dyn BopsAssetExternalImageHandlerFactory>>,
 }
 
 /// Why we need to be repainted. This is used for debugging.
@@ -214,6 +223,8 @@ impl Paint {
             webxr_main_thread: RefCell::new(webxr_main_thread),
             #[cfg(feature = "webgpu")]
             webgpu_image_map: Default::default(),
+            bops_asset_external_image_handler_factory: state
+                .bops_asset_external_image_handler_factory,
         }))
     }
 
@@ -299,6 +310,15 @@ impl Paint {
 
     pub fn webrender_external_image_id_manager(&self) -> WebRenderExternalImageIdManager {
         self.webrender_external_image_id_manager.clone()
+    }
+
+    /// `bops-render` extension. Returns the factory the embedder
+    /// installed at construction (or `None`). Called by [`Painter::new`]
+    /// once per painter to install a per-painter handler.
+    pub(crate) fn bops_asset_external_image_handler_factory(
+        &self,
+    ) -> Option<Arc<dyn BopsAssetExternalImageHandlerFactory>> {
+        self.bops_asset_external_image_handler_factory.clone()
     }
 
     pub fn webxr_running(&self) -> bool {

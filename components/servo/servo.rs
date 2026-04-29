@@ -884,6 +884,10 @@ impl Servo {
             event_loop_waker: event_loop_waker.clone(),
             #[cfg(feature = "webxr")]
             webxr_registry: builder.webxr_registry,
+            // `bops-render` extension. Pass the embedder-supplied factory
+            // (or `None` for upstream / non-bops embedders).
+            bops_asset_external_image_handler_factory: builder
+                .bops_asset_external_image_handler_factory,
         });
 
         let protocols = Arc::new(protocols);
@@ -1332,6 +1336,12 @@ pub struct ServoBuilder {
     protocol_registry: ProtocolRegistry,
     #[cfg(feature = "webxr")]
     webxr_registry: Box<dyn webxr::WebXrRegistry>,
+    /// `bops-render` extension. Embedder-supplied factory used by every
+    /// [`Painter`] to install a [`WebRenderImageHandlerType::BopsAsset`]
+    /// handler. See
+    /// [`paint::InitialPaintState::bops_asset_external_image_handler_factory`].
+    bops_asset_external_image_handler_factory:
+        Option<std::sync::Arc<dyn paint::BopsAssetExternalImageHandlerFactory>>,
 }
 
 impl Default for ServoBuilder {
@@ -1343,6 +1353,7 @@ impl Default for ServoBuilder {
             protocol_registry: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_registry: Box::new(DefaultWebXrRegistry),
+            bops_asset_external_image_handler_factory: None,
         }
     }
 }
@@ -1375,6 +1386,21 @@ impl ServoBuilder {
     #[cfg(feature = "webxr")]
     pub fn webxr_registry(mut self, webxr_registry: Box<dyn webxr::WebXrRegistry>) -> Self {
         self.webxr_registry = webxr_registry;
+        self
+    }
+
+    /// `bops-render` extension. Install an embedder-supplied factory
+    /// for [`paint::WebRenderImageHandlerType::BopsAsset`]. The
+    /// factory is invoked once per [`Painter`] (per panel rendering
+    /// context) to produce a fresh
+    /// [`paint::WebRenderExternalImageApi`] handler. See
+    /// `crates/renderer/src/embedder/asset_handler.rs` in the
+    /// `bops-render` workspace for the asset-cache implementation.
+    pub fn bops_asset_external_image_handler_factory(
+        mut self,
+        factory: std::sync::Arc<dyn paint::BopsAssetExternalImageHandlerFactory>,
+    ) -> Self {
+        self.bops_asset_external_image_handler_factory = Some(factory);
         self
     }
 }
