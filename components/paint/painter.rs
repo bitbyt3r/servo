@@ -186,7 +186,7 @@ impl Painter {
         // `Arc<AssetCache>` (or equivalent) so all per-painter
         // handlers share state without taking the same `&mut`.
         if let Some(factory) = paint.bops_asset_external_image_handler_factory() {
-            let handler = factory.make_handler();
+            let handler = factory.make_handler(&rendering_context);
             external_image_handlers.set_handler(handler, WebRenderImageHandlerType::BopsAsset);
         }
 

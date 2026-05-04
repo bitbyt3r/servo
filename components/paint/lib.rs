@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use embedder_traits::{EventLoopWaker, ShutdownState};
+use paint_api::rendering_context::RenderingContext;
 use paint_api::{PaintMessage, PaintProxy, WebRenderExternalImageApi};
 use profile_traits::{mem, time};
 use servo_base::generic_channel::RoutedReceiver;
@@ -72,6 +73,15 @@ pub struct InitialPaintState {
 /// `bops-render` extension. Factory for [`WebRenderExternalImageApi`]
 /// handlers, called once per [`Painter`] construction. See
 /// [`InitialPaintState::bops_asset_external_image_handler_factory`].
+///
+/// The painter's [`RenderingContext`] is passed in so the handler can
+/// capture the GL context that its `lock(external_id)` results must be
+/// valid in (handlers that return `ExternalImageSource::NativeTexture`
+/// need to create the texture in this context). The reference is
+/// borrowed; clone if the handler needs to retain it.
 pub trait BopsAssetExternalImageHandlerFactory: Send + Sync {
-    fn make_handler(&self) -> Box<dyn WebRenderExternalImageApi>;
+    fn make_handler(
+        &self,
+        rendering_context: &Rc<dyn RenderingContext>,
+    ) -> Box<dyn WebRenderExternalImageApi>;
 }
