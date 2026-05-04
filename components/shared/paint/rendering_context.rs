@@ -745,6 +745,21 @@ impl OffscreenRenderingContext {
         &self.parent_context
     }
 
+    /// `bops-render` extension. Returns the GL framebuffer object id
+    /// the painter writes into. Embedders use this to bind the
+    /// offscreen FBO as the source side of a `glBlitFramebuffer` call
+    /// — e.g. blitting the painted contents into an externally-owned
+    /// IOSurface/DMABUF-backed `TEXTURE_2D` for zero-copy delivery to
+    /// downstream consumers.
+    ///
+    /// `None` means the framebuffer hasn't been allocated yet (paint
+    /// hasn't run, or storage allocation failed). In that case the
+    /// caller should skip the blit for this frame; the next paint will
+    /// re-attempt allocation.
+    pub fn framebuffer_id(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.framebuffer.borrow().framebuffer_id)
+    }
+
     pub fn render_to_parent_callback(&self) -> Option<RenderToParentCallback> {
         // Don't accept a `None` context for the source framebuffer.
         let front_framebuffer_id =
