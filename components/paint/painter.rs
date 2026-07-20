@@ -48,9 +48,10 @@ use webrender_api::units::{
 use webrender_api::{
     self, BuiltDisplayList, BuiltDisplayListDescriptor, ColorF, DirtyRect, DisplayListPayload,
     DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalScrollId, FontInstanceFlags,
-    FontInstanceKey, FontInstanceOptions, FontKey, FontVariation, ImageData, ImageKey,
-    NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding, ReferenceFrameKind,
-    RenderReasons, SampledScrollOffset, SpaceAndClipInfo, SpatialId, TransformStyle,
+    ExternalImageData, ExternalImageId, FontInstanceKey, FontInstanceOptions, FontKey,
+    FontVariation, ImageData, ImageDescriptor, ImageKey, NativeFontHandle,
+    PipelineId as WebRenderPipelineId, PropertyBinding, ReferenceFrameKind, RenderReasons,
+    SampledScrollOffset, SpaceAndClipInfo, SpatialId, TransformStyle,
 };
 use wr_malloc_size_of::MallocSizeOfOps;
 
@@ -128,6 +129,18 @@ pub(crate) struct Painter {
     /// A cache that stores data for all animating images uploaded to WebRender. This is used
     /// for animated images, which only need to update their offset in the data.
     animation_image_cache: FxHashMap<ImageKey, Arc<Vec<u8>>>,
+
+    /// `bops-render` extension: embedder-registered external images, keyed by the
+    /// embedder's own [`ExternalImageId`], so
+    /// [`Self::mark_external_image_dirty`] can rebuild the exact
+    /// `update_image` that WebRender needs to see.
+    ///
+    /// Derived from the ordinary `ImageUpdate` flow rather than plumbed
+    /// separately: `AddImage` carrying [`SerializableImageData::External`]
+    /// records the entry, `DeleteImage` drops it. The embedder never learns
+    /// the [`ImageKey`] (those are minted inside the net image cache), so
+    /// this table is what bridges the id it *does* know back to one.
+    bops_external_images: FxHashMap<ExternalImageId, (ImageKey, ImageDescriptor, ExternalImageData)>,
 
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
@@ -291,6 +304,7 @@ impl Painter {
             frame_delayer: Default::default(),
             lcp_calculator: LargestContentfulPaintCalculator::new(),
             animation_image_cache: FxHashMap::default(),
+            bops_external_images: FxHashMap::default(),
             web_content_animator: WebContentAnimator::new(
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
@@ -1067,11 +1081,83 @@ impl Painter {
         }
     }
 
+    /// `bops-render` extension: tell WebRender that the texture behind an
+    /// embedder-registered external image now holds different pixels, so the
+    /// picture-cache tiles that sample it — and only those — are invalidated
+    /// and a frame is rebuilt.
+    ///
+    /// Ids this painter's content does not sample are skipped, so an
+    /// embedder can broadcast one dirty batch to every panel. Returns how
+    /// many were actually marked; ZERO sends no transaction at all, which
+    /// is what keeps an idle panel idle.
+    ///
+    /// # Why this exists
+    ///
+    /// An external image's pixels change out-of-band (the embedder repaints
+    /// the shared texture), which is invisible to Servo: the DOM is
+    /// unchanged, so no display list is rebuilt, so no frame is generated,
+    /// so the compositor keeps presenting cached tiles and never re-invokes
+    /// `ExternalImageHandler::lock`. Embedders have had to force the issue
+    /// with a perpetual CSS animation, which drives script's "update the
+    /// rendering" and produces a full `RenderReasons::SCENE` rebuild every
+    /// tick — invalidating *every* tile on the page, at 60 Hz.
+    ///
+    /// `Transaction::update_image` re-registering the SAME
+    /// `ImageData::External` is the WebRender-idiomatic signal instead: it
+    /// bumps the image's generation, and picture caching compares that
+    /// generation per primitive (`ImageDependency`), so invalidation is
+    /// scoped to the quadtree leaves the image actually covers. For an
+    /// external `TextureHandle` this update is a pure metadata swap — no
+    /// upload, no texture-cache traffic.
+    ///
+    /// `generate_frame` is required and deliberately NOT routed through
+    /// `frame_delayer`: that gate only opens for script-driven rendering
+    /// updates, which is exactly what is absent here.
+    pub(crate) fn mark_external_images_dirty(&mut self, external_ids: &[ExternalImageId]) -> usize {
+        let mut txn = Transaction::new();
+        let mut marked = 0usize;
+        for id in external_ids {
+            let Some((key, descriptor, external)) = self.bops_external_images.get(id) else {
+                continue; // not sampled by this painter's content
+            };
+            // The descriptor goes back verbatim: its size is baked into the
+            // display list's primitive geometry, and `update_image`
+            // overwrites the resource's visible rect from it.
+            txn.update_image(
+                *key,
+                *descriptor,
+                ImageData::External(*external),
+                // External texture handles never touch the texture cache,
+                // so the dirty rect is inert here — the generation bump is
+                // the signal.
+                &DirtyRect::All,
+            );
+            marked += 1;
+        }
+        if marked == 0 {
+            return 0;
+        }
+        // ONE frame for the whole batch. ANIMATED_PROPERTY, not SCENE: the
+        // scene is unchanged, only resources it references — SCENE would
+        // hint a fuller invalidation than we need.
+        self.generate_frame(&mut txn, RenderReasons::ANIMATED_PROPERTY);
+        self.send_transaction(txn);
+        marked
+    }
+
     pub(crate) fn update_images(&mut self, updates: SmallVec<[ImageUpdate; 1]>) {
         let mut txn = Transaction::new();
         for update in updates {
             match update {
                 ImageUpdate::AddImage(key, description, data, is_animated_image) => {
+                    // bops-render: remember embedder-supplied external
+                    // images so their contents can later be invalidated
+                    // without a scene rebuild (see
+                    // `mark_external_image_dirty`).
+                    if let SerializableImageData::External(external) = data {
+                        self.bops_external_images
+                            .insert(external.id, (key, description, external));
+                    }
                     txn.add_image(
                         key,
                         description,
@@ -1087,6 +1173,7 @@ impl Painter {
                     txn.delete_image(key);
                     self.frame_delayer.delete_image(key);
                     self.animation_image_cache.remove(&key);
+                    self.bops_external_images.retain(|_, (k, ..)| *k != key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
                     if let Some(epoch) = epoch {

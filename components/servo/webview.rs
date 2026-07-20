@@ -632,6 +632,31 @@ impl WebView {
         self.inner().servo.paint().render(self.id());
     }
 
+    /// `bops-render` extension. Signal that the GPU textures behind
+    /// embedder-registered external images (the `image/x-bops-external`
+    /// path) now hold different pixels.
+    ///
+    /// Invalidates exactly the picture-cache tiles that sample them and
+    /// rebuilds ONE frame, WITHOUT rebuilding the scene. Call this before
+    /// [`Self::paint`] with every external image that produced a new frame
+    /// this tick.
+    ///
+    /// Without it, an out-of-band pixel change is invisible to Servo — the
+    /// DOM is unchanged, so no frame is generated and the compositor keeps
+    /// presenting cached tiles. The workaround embedders have needed is a
+    /// perpetual CSS animation, which forces a full scene rebuild every
+    /// tick and defeats picture caching entirely.
+    ///
+    /// Ids this webview does not sample are skipped and no transaction is
+    /// sent when none match, so an embedder can broadcast one batch to
+    /// every webview and idle pages stay idle. Returns how many matched.
+    pub fn mark_external_images_dirty(&self, external_ids: &[u64]) -> usize {
+        self.inner()
+            .servo
+            .paint()
+            .mark_external_images_dirty(self.id(), external_ids)
+    }
+
     /// Get the [`UserContentManager`] associated with this [`WebView`].
     pub fn user_content_manager(&self) -> Option<Rc<UserContentManager>> {
         self.inner().user_content_manager.clone()

@@ -717,6 +717,21 @@ impl Paint {
             .render(&self.time_profiler_chan);
     }
 
+    /// `bops-render` extension. Invalidate the picture-cache tiles that
+    /// sample the given embedder-registered external images in this
+    /// webview, and rebuild ONE frame — without a scene rebuild.
+    ///
+    /// See [`Painter::mark_external_images_dirty`]. Returns how many of
+    /// `external_ids` this webview actually samples.
+    pub fn mark_external_images_dirty(&self, webview_id: WebViewId, external_ids: &[u64]) -> usize {
+        let ids: Vec<webrender_api::ExternalImageId> = external_ids
+            .iter()
+            .map(|id| webrender_api::ExternalImageId(*id))
+            .collect();
+        self.painter_mut(webview_id.into())
+            .mark_external_images_dirty(&ids)
+    }
+
     /// Get the message receiver for this [`Paint`].
     pub fn receiver(&self) -> &RoutedReceiver<PaintMessage> {
         &self.paint_receiver
