@@ -18,7 +18,8 @@ use mime::Mime;
 use net_traits::image_cache::{
     FontResolver, Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback,
     ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
-    ImageResponse, PendingImageId, RasterizationCompleteResponse, RasterizationResult, VectorImage,
+    ImageResponse, PendingImageId, RasterizationCompleteResponse, RasterizationResult, TextureImage,
+    VectorImage,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchResponseMsg, Metadata, NetworkError};
@@ -35,8 +36,15 @@ use servo_base::id::{PipelineId, WebViewId};
 use servo_base::threadpool::ThreadPool;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use uuid::Uuid;
-use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
+use webrender_api::{
+    ExternalImageData, ExternalImageId, ExternalImageType, ImageBufferKind, ImageDescriptor,
+    ImageDescriptorFlags, ImageFormat as WebRenderImageFormat, ImageKey as WebRenderImageKey,
+};
+
+/// Content type of an embedder texture image: see
+/// `embedder_traits::EmbedderTextures`.  The body is `u32` id, width, height.
+const TEXTURE_MIME_TYPE: &str = "image/x-servo-texture";
 
 use crate::image_cache::KeyCacheState::PipelineClosed;
 
@@ -100,15 +108,20 @@ fn decode_bytes_sync(
     content_type: Option<Mime>,
     usvg_options: Arc<usvg::Options>,
 ) -> DecoderMsg {
-    let is_svg_document = content_type.is_some_and(|content_type| {
+    let is_svg_document = content_type.as_ref().is_some_and(|content_type| {
         (
             content_type.type_(),
             content_type.subtype(),
             content_type.suffix(),
         ) == (mime::IMAGE, mime::SVG, Some(mime::XML))
     });
+    let is_texture = content_type
+        .as_ref()
+        .is_some_and(|content_type| content_type.essence_str() == TEXTURE_MIME_TYPE);
 
-    let image = if is_svg_document {
+    let image = if is_texture {
+        decode_texture(bytes, cors)
+    } else if is_svg_document {
         parse_svg_document_in_memory(bytes, usvg_options)
             .ok()
             .map(|svg_tree| {
@@ -261,6 +274,33 @@ impl std::fmt::Debug for VectorImageData {
 enum DecodedImage {
     Raster(RasterImage),
     Vector(VectorImageData),
+    Texture(TextureImageData),
+}
+
+/// The decoded body of an `image/x-servo-texture` response.
+#[derive(Debug)]
+struct TextureImageData {
+    external_id: u32,
+    width: u32,
+    height: u32,
+    cors_status: CorsStatus,
+}
+
+fn decode_texture(bytes: &[u8], cors_status: CorsStatus) -> Option<DecodedImage> {
+    let [id, width, height] = <[[u8; 4]; 3]>::try_from(bytes.as_chunks::<4>().0)
+        .ok()
+        .filter(|_| bytes.len() == 12)?
+        .map(u32::from_le_bytes);
+    if width == 0 || height == 0 {
+        warn!("{TEXTURE_MIME_TYPE}: texture {id} has no size");
+        return None;
+    }
+    Some(DecodedImage::Texture(TextureImageData {
+        external_id: id,
+        width,
+        height,
+        cors_status,
+    }))
 }
 
 /// Message that the decoder worker threads send to the image cache.
@@ -334,6 +374,7 @@ impl LoadKeyGenerator {
 enum LoadResult {
     LoadedRasterImage(RasterImage),
     LoadedVectorImage(VectorImageData),
+    LoadedTexture(TextureImage),
     FailedToLoadOrDecode,
 }
 
@@ -702,6 +743,9 @@ impl ImageCacheStore {
                 };
                 ImageResponse::Loaded(Image::Vector(vector_image), url.unwrap())
             },
+            LoadResult::LoadedTexture(texture) => {
+                ImageResponse::Loaded(Image::Texture(texture), url.unwrap())
+            },
             LoadResult::FailedToLoadOrDecode => ImageResponse::FailedToLoadOrDecode,
         };
 
@@ -726,12 +770,18 @@ impl ImageCacheStore {
         origin: &ImmutableOrigin,
         cors_setting: &Option<CorsSettings>,
     ) {
-        if let Some(loaded_image) =
-            self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
-            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
-            let Some(id) = image.id
-        {
+        let Some(loaded_image) = self
+            .completed_loads
+            .remove(&(url.clone(), origin.clone(), *cors_setting))
+        else {
+            return;
+        };
+        let key = match loaded_image.image_response {
+            ImageResponse::Loaded(Image::Raster(image), _) => image.id,
+            ImageResponse::Loaded(Image::Texture(image), _) => Some(image.id),
+            _ => None,
+        };
+        if let Some(id) = key {
             self.paint_api.update_images(
                 self.webview_id.into(),
                 vec![ImageUpdate::DeleteImage(id)].into(),
@@ -799,8 +849,45 @@ impl ImageCacheStore {
             Some(DecodedImage::Vector(vector_image_data)) => {
                 LoadResult::LoadedVectorImage(vector_image_data)
             },
+            Some(DecodedImage::Texture(texture)) => self.register_texture(texture),
         };
         self.complete_load(msg.key, image);
+    }
+
+    /// Register an embedder texture with WebRender as an external image.  The
+    /// embedder's texture id becomes the WebRender external image id; the
+    /// pixels are fetched from the embedder at composite time.
+    fn register_texture(&mut self, texture: TextureImageData) -> LoadResult {
+        let Some(image_key) = self.paint_api.generate_image_key_blocking(self.webview_id) else {
+            warn!("{TEXTURE_MIME_TYPE}: could not allocate an image key");
+            return LoadResult::FailedToLoadOrDecode;
+        };
+        let descriptor = ImageDescriptor::new(
+            texture.width as i32,
+            texture.height as i32,
+            WebRenderImageFormat::BGRA8,
+            ImageDescriptorFlags::IS_OPAQUE,
+        );
+        let external = ExternalImageData {
+            id: ExternalImageId(texture.external_id as u64),
+            channel_index: 0,
+            image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+            normalized_uvs: false,
+        };
+        self.paint_api.add_image(
+            image_key,
+            descriptor,
+            SerializableImageData::External(external),
+            false,
+        );
+        LoadResult::LoadedTexture(TextureImage {
+            id: image_key,
+            metadata: ImageMetadata {
+                width: texture.width,
+                height: texture.height,
+            },
+            cors_status: texture.cors_status,
+        })
     }
 }
 

@@ -1066,6 +1066,7 @@ impl Servo {
             mem_profiler_chan: mem_profiler_chan.clone(),
             shutdown_state: shutdown_state.clone(),
             event_loop_waker: event_loop_waker.clone(),
+            embedder_textures: builder.embedder_textures,
         });
 
         let protocols = Arc::new(protocols);
@@ -1541,6 +1542,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    embedder_textures: Option<Arc<dyn EmbedderTextures>>,
 }
 
 impl Default for ServoBuilder {
@@ -1550,6 +1552,7 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            embedder_textures: None,
         }
     }
 }
@@ -1576,6 +1579,13 @@ impl ServoBuilder {
 
     pub fn protocol_registry(mut self, protocol_registry: ProtocolRegistry) -> Self {
         self.protocol_registry = protocol_registry;
+        self
+    }
+
+    /// Let pages show textures owned by the embedder; see
+    /// [`EmbedderTextures`].
+    pub fn embedder_textures(mut self, textures: Arc<dyn EmbedderTextures>) -> Self {
+        self.embedder_textures = Some(textures);
         self
     }
 }

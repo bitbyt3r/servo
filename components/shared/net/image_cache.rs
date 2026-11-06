@@ -50,6 +50,16 @@ pub type VectorImageId = PendingImageId;
 pub enum Image {
     Raster(#[conditional_malloc_size_of] Arc<RasterImage>),
     Vector(VectorImage),
+    /// An embedder-supplied texture (`image/x-servo-texture`): already
+    /// registered with WebRender, so only the key and the size are needed.
+    Texture(TextureImage),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct TextureImage {
+    pub id: ImageKey,
+    pub metadata: ImageMetadata,
+    pub cors_status: CorsStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -66,6 +76,7 @@ impl Image {
         match self {
             Image::Vector(image, ..) => image.metadata,
             Image::Raster(image) => image.metadata,
+            Image::Texture(image) => image.metadata,
         }
     }
 
@@ -73,13 +84,14 @@ impl Image {
         match self {
             Image::Vector(image) => image.cors_status,
             Image::Raster(image) => image.cors_status,
+            Image::Texture(image) => image.cors_status,
         }
     }
 
     pub fn as_raster_image(&self) -> Option<Arc<RasterImage>> {
         match self {
             Image::Raster(image) => Some(image.clone()),
-            Image::Vector(..) => None,
+            Image::Vector(..) | Image::Texture(..) => None,
         }
     }
 
@@ -87,6 +99,7 @@ impl Image {
         match self {
             Image::Raster(image) => image.load_time,
             Image::Vector(image) => image.load_time,
+            Image::Texture(..) => None,
         }
     }
 }

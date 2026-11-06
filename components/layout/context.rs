@@ -292,6 +292,7 @@ impl ImageResolver {
                 self.rasterize_vector_image(vector_image.id, size, node, vector_image.svg_id)
                     .and_then(|rasterized_image| rasterized_image.id)
             }),
+            CachedImage::Texture(texture) => Some(texture.id),
         }
     }
 

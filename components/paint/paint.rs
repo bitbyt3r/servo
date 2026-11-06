@@ -15,8 +15,8 @@ use bitflags::bitflags;
 use crossbeam_channel::Sender;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    EventLoopWaker, InputEventAndId, InputEventId, InputEventResult, ScreenshotCaptureError,
-    Scroll, ShutdownState, ViewportDetails, WebViewPoint, WebViewRect,
+    EmbedderTextures, EventLoopWaker, InputEventAndId, InputEventId, InputEventResult,
+    ScreenshotCaptureError, Scroll, ShutdownState, ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -166,6 +166,10 @@ pub struct Paint {
     /// An map of external images shared between all `WebGpuExternalImages`.
     #[cfg(feature = "webgpu")]
     webgpu_image_map: std::cell::OnceCell<WebGpuExternalImageMap>,
+
+    /// Textures the embedder makes available to pages, installed on every
+    /// painter's external image handler.
+    pub(crate) embedder_textures: Option<std::sync::Arc<dyn EmbedderTextures>>,
 }
 
 /// Why we need to be repainted. This is used for debugging.
@@ -247,6 +251,7 @@ impl Paint {
             webxr_main_thread: RefCell::new(webxr_main_thread),
             #[cfg(feature = "webgpu")]
             webgpu_image_map: Default::default(),
+            embedder_textures: state.embedder_textures,
         }))
     }
 
@@ -754,6 +759,18 @@ impl Paint {
     pub fn render(&self, webview_id: WebViewId) {
         self.painter_mut(webview_id.into())
             .render(&self.time_profiler_chan);
+    }
+
+    /// Repaint the embedder textures with the given ids in the next frame.
+    /// Returns how many of them this webview shows.
+    pub fn mark_embedder_textures_dirty(&self, webview_id: WebViewId, ids: &[u64]) -> usize {
+        self.painter_mut(webview_id.into())
+            .mark_embedder_textures_dirty(ids)
+    }
+
+    /// Whether frames requested from WebRender are still being built.
+    pub fn has_pending_frames(&self, webview_id: WebViewId) -> bool {
+        self.painter(webview_id.into()).has_pending_frames()
     }
 
     /// Get the message receiver for this [`Paint`].

@@ -10,9 +10,10 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    InputEvent, InputEventAndId, InputEventId, InputEventResult, PaintHitTestResult,
-    ScreenshotCaptureError, Scroll, ViewportDetails, WebViewPoint, WebViewRect,
+    EmbedderTextures, InputEvent, InputEventAndId, InputEventId, InputEventResult,
+    PaintHitTestResult, ScreenshotCaptureError, Scroll, ViewportDetails, WebViewPoint, WebViewRect,
 };
+use euclid::default::Size2D as UntypedSize2D;
 use euclid::{Point2D, Rect, Scale, Size2D};
 use gleam::gl::RENDERER;
 use image::RgbaImage;
@@ -24,8 +25,9 @@ use paint_api::display_list::{
 use paint_api::rendering_context::RenderingContext;
 use paint_api::viewport_description::ViewportDescription;
 use paint_api::{
-    ImageUpdate, PipelineExitSource, SendableFrameTree, SerializableDisplayListPayload,
-    SerializableImageData, WebRenderExternalImageHandlers, WebRenderImageHandlerType, WebViewTrait,
+    ExternalImageSource, ImageUpdate, PipelineExitSource, SendableFrameTree,
+    SerializableDisplayListPayload, SerializableImageData, WebRenderExternalImageApi,
+    WebRenderExternalImageHandlers, WebRenderImageHandlerType, WebViewTrait,
 };
 use profile_traits::time::{ProfilerCategory, ProfilerChan};
 use profile_traits::time_profile;
@@ -49,12 +51,32 @@ use webrender_api::units::{
 };
 use webrender_api::{
     self, BuiltDisplayList, BuiltDisplayListDescriptor, ColorF, DirtyRect, DisplayListPayload,
-    DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalScrollId, FontInstanceFlags,
-    FontInstanceKey, FontInstanceOptions, FontInstancePlatformOptions, FontKey, FontVariation,
-    ImageData, ImageKey, NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding,
-    PropertyBindingKey, PropertyValue, ReferenceFrameKind, RenderReasons, SampledScrollOffset,
-    SpaceAndClipInfo, SpatialId, TransformStyle,
+    DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalImageData, ExternalImageId,
+    ExternalScrollId, FontInstanceFlags, FontInstanceKey, FontInstanceOptions,
+    FontInstancePlatformOptions, FontKey, FontVariation, ImageData, ImageDescriptor, ImageKey,
+    NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding, PropertyBindingKey,
+    PropertyValue, ReferenceFrameKind, RenderReasons, SampledScrollOffset, SpaceAndClipInfo,
+    SpatialId, TransformStyle,
 };
+
+/// Adapts the embedder's texture provider to WebRender's handler interface.
+struct EmbedderTextureHandler(Arc<dyn EmbedderTextures>);
+
+impl WebRenderExternalImageApi for EmbedderTextureHandler {
+    fn lock(&mut self, id: u64) -> (ExternalImageSource<'_>, UntypedSize2D<i32>) {
+        match self.0.lock(id) {
+            Some(texture) => (
+                ExternalImageSource::NativeTexture(texture.texture),
+                UntypedSize2D::new(texture.width as i32, texture.height as i32),
+            ),
+            None => (ExternalImageSource::Invalid, UntypedSize2D::zero()),
+        }
+    }
+
+    fn unlock(&mut self, id: u64) {
+        self.0.unlock(id)
+    }
+}
 use wr_malloc_size_of::MallocSizeOfOps;
 
 use crate::Paint;
@@ -129,6 +151,10 @@ pub(crate) struct Painter {
     /// for animated images, which only need to update their offset in the data.
     animation_image_cache: FxHashMap<ImageKey, Arc<Vec<u8>>>,
 
+    /// Embedder textures this painter has registered, by the embedder's id,
+    /// so that their picture-cache tiles can be invalidated on request.
+    embedder_textures: FxHashMap<ExternalImageId, (ImageKey, ImageDescriptor, ExternalImageData)>,
+
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
     web_content_animator: WebContentAnimator,
@@ -184,6 +210,12 @@ impl Painter {
         );
 
         WindowGLContext::initialize_image_handler(&mut external_image_handlers);
+        if let Some(textures) = paint.embedder_textures.clone() {
+            external_image_handlers.set_handler(
+                Box::new(EmbedderTextureHandler(textures)),
+                WebRenderImageHandlerType::Embedder,
+            );
+        }
 
         let embedder_to_constellation_sender = paint.embedder_to_constellation_sender.clone();
         let timer_refresh_driver = LazyCell::default();
@@ -293,6 +325,7 @@ impl Painter {
             last_mouse_move_position: None,
             frame_delayer: Default::default(),
             animation_image_cache: FxHashMap::default(),
+            embedder_textures: FxHashMap::default(),
             web_content_animator: WebContentAnimator::new(
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
@@ -1155,11 +1188,36 @@ impl Painter {
         }
     }
 
+    /// The embedder changed the contents of these textures.  Re-registering
+    /// the same external image bumps its generation, which invalidates only
+    /// the picture-cache tiles that sample it; one frame is then built.
+    pub(crate) fn mark_embedder_textures_dirty(&mut self, ids: &[u64]) -> usize {
+        let mut txn = Transaction::new();
+        let mut marked = 0;
+        for id in ids {
+            if let Some((key, descriptor, external)) =
+                self.embedder_textures.get(&ExternalImageId(*id))
+            {
+                txn.update_image(*key, *descriptor, ImageData::External(*external), &DirtyRect::All);
+                marked += 1;
+            }
+        }
+        if marked > 0 {
+            self.generate_frame(&mut txn, RenderReasons::ANIMATED_PROPERTY);
+            self.send_transaction(txn);
+        }
+        marked
+    }
+
     pub(crate) fn update_images(&mut self, updates: SmallVec<[ImageUpdate; 1]>) {
         let mut txn = Transaction::new();
         for update in updates {
             match update {
                 ImageUpdate::AddImage(key, description, data, is_animated_image) => {
+                    if let SerializableImageData::External(external) = data {
+                        self.embedder_textures
+                            .insert(external.id, (key, description, external));
+                    }
                     txn.add_image(
                         key,
                         description,
@@ -1175,6 +1233,7 @@ impl Painter {
                     txn.delete_image(key);
                     self.frame_delayer.delete_image(key);
                     self.animation_image_cache.remove(&key);
+                    self.embedder_textures.retain(|_, (k, ..)| *k != key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
                     if let Some(epoch) = epoch {

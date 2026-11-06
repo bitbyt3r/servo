@@ -561,6 +561,9 @@ pub enum WebRenderImageHandlerType {
     WebGl,
     Media,
     WebGpu,
+    /// Textures supplied by the embedder (`embedder_traits::EmbedderTextures`).
+    /// Their ids are chosen by the embedder, so they are not in the id manager.
+    Embedder,
 }
 
 /// List of WebRender external images to be shared among all external image
@@ -603,6 +606,8 @@ pub struct WebRenderExternalImageHandlers {
     media_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// WebGPU handler.
     webgpu_handler: Option<Box<dyn WebRenderExternalImageApi>>,
+    /// Embedder texture handler.
+    embedder_handler: Option<Box<dyn WebRenderExternalImageApi>>,
     /// A [`WebRenderExternalImageIdManager`] responsible for creating new [`ExternalImageId`]s.
     /// This is shared with the WebGL, WebGPU, and hardware-accelerated media threads and
     /// all other instances of [`WebRenderExternalImageHandlers`] -- one per WebRender instance.
@@ -615,6 +620,7 @@ impl WebRenderExternalImageHandlers {
             webgl_handler: Default::default(),
             media_handler: Default::default(),
             webgpu_handler: Default::default(),
+            embedder_handler: Default::default(),
             id_manager,
         }
     }
@@ -632,6 +638,16 @@ impl WebRenderExternalImageHandlers {
             WebRenderImageHandlerType::WebGl => self.webgl_handler = Some(handler),
             WebRenderImageHandlerType::Media => self.media_handler = Some(handler),
             WebRenderImageHandlerType::WebGpu => self.webgpu_handler = Some(handler),
+            WebRenderImageHandlerType::Embedder => self.embedder_handler = Some(handler),
+        }
+    }
+
+    /// Ids not minted by the id manager belong to the embedder's textures.
+    fn handler_type(&self, key: &ExternalImageId) -> WebRenderImageHandlerType {
+        match self.id_manager().get(key) {
+            Some(handler_type) => handler_type,
+            None if self.embedder_handler.is_some() => WebRenderImageHandlerType::Embedder,
+            None => panic!("Tried to get unknown external image"),
         }
     }
 }
@@ -647,11 +663,7 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
-        match handler_type {
+        match self.handler_type(&key) {
             WebRenderImageHandlerType::WebGl => {
                 let (source, size) = self.webgl_handler.as_mut().unwrap().lock(key.0);
                 let texture_id = match source {
@@ -681,21 +693,28 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
                     source,
                 }
             },
+            WebRenderImageHandlerType::Embedder => {
+                let (source, size) = self.embedder_handler.as_mut().unwrap().lock(key.0);
+                // Embedder textures are top-down, like decoded images.
+                ExternalImage {
+                    uv: TexelRect::new(0.0, 0.0, size.width as f32, size.height as f32),
+                    source,
+                }
+            },
         }
     }
 
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
-        match handler_type {
+        match self.handler_type(&key) {
             WebRenderImageHandlerType::WebGl => self.webgl_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::Media => self.media_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::WebGpu => {
                 self.webgpu_handler.as_mut().unwrap().unlock(key.0)
+            },
+            WebRenderImageHandlerType::Embedder => {
+                self.embedder_handler.as_mut().unwrap().unlock(key.0)
             },
         };
     }

@@ -10,7 +10,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crossbeam_channel::Sender;
-use embedder_traits::{EventLoopWaker, ShutdownState};
+use std::sync::Arc;
+
+use embedder_traits::{EmbedderTextures, EventLoopWaker, ShutdownState};
 use paint_api::{PaintMessage, PaintProxy};
 use profile_traits::{mem, time};
 use servo_base::generic_channel::RoutedReceiver;
@@ -52,4 +54,6 @@ pub struct InitialPaintState {
     /// An [`EventLoopWaker`] used in order to wake up the embedder when it is
     /// time to paint.
     pub event_loop_waker: Box<dyn EventLoopWaker>,
+    /// Textures the embedder makes available to pages, if any.
+    pub embedder_textures: Option<Arc<dyn EmbedderTextures>>,
 }

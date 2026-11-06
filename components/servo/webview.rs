@@ -731,6 +731,21 @@ impl WebView {
         self.servo().paint().render(self.id());
     }
 
+    /// The embedder changed the contents of these textures (see
+    /// [`EmbedderTextures`](embedder_traits::EmbedderTextures)); repaint what
+    /// shows them in the next frame.  Returns how many this webview shows.
+    pub fn mark_embedder_textures_dirty(&self, ids: &[u64]) -> usize {
+        self.servo().paint().mark_embedder_textures_dirty(self.id(), ids)
+    }
+
+    /// Whether frames requested from WebRender are still being built.  An
+    /// embedder painting on its own clock waits for this to clear after
+    /// [`Self::mark_embedder_textures_dirty`], so that [`Self::paint`] shows
+    /// the newest texture contents rather than a frame built before.
+    pub fn has_pending_frames(&self) -> bool {
+        self.servo().paint().has_pending_frames(self.id())
+    }
+
     /// Get the [`UserContentManager`] associated with this [`WebView`].
     pub fn user_content_manager(&self) -> Option<Rc<UserContentManager>> {
         self.inner().user_content_manager.clone()

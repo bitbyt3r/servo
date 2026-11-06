@@ -911,6 +911,8 @@ impl HTMLLinkElement {
 
         match image {
             Image::Raster(raster_image) => send_rasterized_favicon_to_embedder(&raster_image),
+            // A live texture is not a favicon.
+            Image::Texture(_) => {},
             Image::Vector(vector_image) => {
                 // This size is completely arbitrary.
                 let size = DeviceIntSize::new(250, 250);

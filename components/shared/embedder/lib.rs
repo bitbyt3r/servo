@@ -296,6 +296,27 @@ pub trait RefreshDriver {
     fn observe_next_frame(&self, start_frame_callback: Box<dyn Fn() + Send + 'static>);
 }
 
+/// A GL texture the embedder supplies for an `image/x-servo-texture` image.
+/// The texture lives in the GL context of the [`WebView`]'s rendering context
+/// and holds its rows top-down, like a decoded image.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbedderTexture {
+    pub texture: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Live textures owned by the embedder (video inputs, for instance).  A page
+/// shows one with an image whose response has Content-Type
+/// `image/x-servo-texture` and a 12-byte body: little-endian `u32` texture id,
+/// width and height.  At composite time Servo asks for the texture by that id.
+/// When the texture's contents change, the embedder calls
+/// `WebView::mark_embedder_textures_dirty` so the next frame repaints them.
+pub trait EmbedderTextures: Send + Sync {
+    fn lock(&self, id: u64) -> Option<EmbedderTexture>;
+    fn unlock(&self, _id: u64) {}
+}
+
 /// Credentials to use in an HTTP authentication challenge.
 #[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct AuthenticationResponse {
