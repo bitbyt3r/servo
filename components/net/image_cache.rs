@@ -43,8 +43,11 @@ use webrender_api::{
 };
 
 /// Content type of an embedder texture image: see
-/// `embedder_traits::EmbedderTextures`.  The body is `u32` id, width, height.
+/// `embedder_traits::EmbedderTextures`.  The body is `u32` id, width, height
+/// and optionally flags.
 const TEXTURE_MIME_TYPE: &str = "image/x-servo-texture";
+/// Body flag: the texture has no meaningful alpha.
+const TEXTURE_FLAG_OPAQUE: u32 = 1;
 
 use crate::image_cache::KeyCacheState::PipelineClosed;
 
@@ -283,14 +286,25 @@ struct TextureImageData {
     external_id: u32,
     width: u32,
     height: u32,
+    opaque: bool,
     cors_status: CorsStatus,
 }
 
 fn decode_texture(bytes: &[u8], cors_status: CorsStatus) -> Option<DecodedImage> {
-    let [id, width, height] = <[[u8; 4]; 3]>::try_from(bytes.as_chunks::<4>().0)
-        .ok()
-        .filter(|_| bytes.len() == 12)?
-        .map(u32::from_le_bytes);
+    let words: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect();
+    let (id, width, height, flags) = match words[..] {
+        [id, width, height] if bytes.len() == 12 => (id, width, height, 0),
+        [id, width, height, flags] if bytes.len() == 16 => (id, width, height, flags),
+        _ => {
+            warn!("{TEXTURE_MIME_TYPE}: body must be 12 or 16 bytes, got {}", bytes.len());
+            return None;
+        },
+    };
     if width == 0 || height == 0 {
         warn!("{TEXTURE_MIME_TYPE}: texture {id} has no size");
         return None;
@@ -299,6 +313,7 @@ fn decode_texture(bytes: &[u8], cors_status: CorsStatus) -> Option<DecodedImage>
         external_id: id,
         width,
         height,
+        opaque: flags & TEXTURE_FLAG_OPAQUE != 0,
         cors_status,
     }))
 }
@@ -866,7 +881,11 @@ impl ImageCacheStore {
             texture.width as i32,
             texture.height as i32,
             WebRenderImageFormat::BGRA8,
-            ImageDescriptorFlags::IS_OPAQUE,
+            if texture.opaque {
+                ImageDescriptorFlags::IS_OPAQUE
+            } else {
+                ImageDescriptorFlags::empty()
+            },
         );
         let external = ExternalImageData {
             id: ExternalImageId(texture.external_id as u64),

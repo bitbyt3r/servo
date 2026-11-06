@@ -308,8 +308,10 @@ pub struct EmbedderTexture {
 
 /// Live textures owned by the embedder (video inputs, for instance).  A page
 /// shows one with an image whose response has Content-Type
-/// `image/x-servo-texture` and a 12-byte body: little-endian `u32` texture id,
-/// width and height.  At composite time Servo asks for the texture by that id.
+/// `image/x-servo-texture` and a body of little-endian `u32`s: texture id,
+/// width, height and optionally flags (bit 0: the texture is opaque; without
+/// it the texture is BGRA with premultiplied alpha).  At composite time Servo
+/// asks for the texture by that id.
 /// When the texture's contents change, the embedder calls
 /// `WebView::mark_embedder_textures_dirty` so the next frame repaints them.
 pub trait EmbedderTextures: Send + Sync {
