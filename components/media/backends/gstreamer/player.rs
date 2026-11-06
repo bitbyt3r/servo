@@ -592,6 +592,10 @@ impl GStreamerPlayer {
                             return Err(gstreamer::FlowError::Flushing);
                         };
 
+                        let present_at = buffer
+                            .pts()
+                            .zip(audio_sink.base_time())
+                            .map(|(pts, base)| base.nseconds() + pts.nseconds());
                         let map = buffer
                             .into_mapped_buffer_readable()
                             .map_err(|_| gstreamer::FlowError::Error)?;
@@ -609,7 +613,7 @@ impl GStreamerPlayer {
                             audio_renderer
                                 .lock()
                                 .unwrap()
-                                .render(Box::new(planar), channel);
+                                .render(Box::new(planar), channel, present_at);
                         }
                         Ok(gstreamer::FlowSuccess::Ok)
                     })

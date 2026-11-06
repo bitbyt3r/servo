@@ -17,7 +17,7 @@ use script_bindings::codegen::GenericBindings::MediaStreamTrackAudioSourceNodeBi
     MediaStreamTrackAudioSourceNodeMethods, MediaStreamTrackAudioSourceOptions,
 };
 use script_bindings::reflector::reflect_dom_object_with_proto;
-use servo_base::id::PipelineId;
+use servo_base::id::WebViewId;
 use servo_media::audio::context::{LatencyCategory, ProcessingState, RealTimeAudioContextOptions};
 
 use crate::conversions::Convert;
@@ -60,12 +60,12 @@ impl AudioContext {
     /// <https://webaudio.github.io/web-audio-api/#AudioContext-constructors>
     fn new_inherited(
         options: &AudioContextOptions,
-        pipeline_id: PipelineId,
+        webview_id: WebViewId,
     ) -> Fallible<AudioContext> {
         // Steps 1-3.
         let context = BaseAudioContext::new_inherited(
             BaseAudioContextOptions::AudioContext(options.convert()),
-            pipeline_id,
+            webview_id,
         )?;
 
         // Step 4.1.
@@ -98,8 +98,8 @@ impl AudioContext {
         proto: Option<HandleObject>,
         options: &AudioContextOptions,
     ) -> Fallible<DomRoot<AudioContext>> {
-        let pipeline_id = window.pipeline_id();
-        let context = AudioContext::new_inherited(options, pipeline_id)?;
+        let webview_id = window.webview_id();
+        let context = AudioContext::new_inherited(options, webview_id)?;
         let context = reflect_dom_object_with_proto(cx, Box::new(context), window, proto);
         context.resume();
         Ok(context)

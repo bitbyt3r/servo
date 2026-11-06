@@ -101,6 +101,10 @@ pub struct BlockInfo {
     pub sample_rate: f32,
     pub frame: Tick,
     pub time: f64,
+    /// The presentation time (CLOCK_MONOTONIC ns) media samples placed at
+    /// the start of this block should carry, when the sink plays on a clock
+    /// it can relate to media timestamps.  See `AudioSink::media_time_for_next_block`.
+    pub media_time: Option<u64>,
 }
 
 impl BlockInfo {

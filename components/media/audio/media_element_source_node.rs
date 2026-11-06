@@ -11,45 +11,47 @@ use malloc_size_of_derive::MallocSizeOf;
 use player::audio::AudioRenderer;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Block, Chunk, FRAMES_PER_BLOCK, FRAMES_PER_BLOCK_USIZE};
+use crate::block::{Block, Chunk, FRAMES_PER_BLOCK_USIZE};
 
 #[derive(Debug, Clone, MallocSizeOf)]
 pub enum MediaElementSourceNodeMessage {
     GetAudioRenderer(Sender<Arc<Mutex<dyn AudioRenderer>>>),
 }
 
+/// Audio delivered by the media element: one buffer per channel, all the
+/// same length, plus the presentation time of one known sample so the rest
+/// can be placed in time.
+#[derive(Default)]
+struct Delivered {
+    channels: Vec<Vec<f32>>,
+    /// (presentation time in CLOCK_MONOTONIC ns, index into the buffers) of
+    /// the first timestamped delivery; later samples follow contiguously.
+    anchor: Option<(u64, i64)>,
+}
+
 #[derive(AudioNodeCommon)]
 pub(crate) struct MediaElementSourceNode {
     channel_info: ChannelInfo,
     renderer: Arc<Mutex<dyn AudioRenderer>>,
-    buffers: Arc<Mutex<Vec<Vec<f32>>>>,
+    delivered: Arc<Mutex<Delivered>>,
+    /// Samples before this index have been played (or skipped).
     playback_offset: usize,
-    /// Smallest backlog (delivered but not yet played samples) seen in the
-    /// current window.  Deliveries arrive in decoder-sized bursts ahead of
-    /// time, so the backlog oscillates; its minimum stays near zero while
-    /// playback keeps up and rises for good after a stall of the audio clock.
-    backlog_min: usize,
-    window_blocks: u32,
 }
 
-/// Window over which the backlog minimum is observed (one second at 48 kHz).
-const RESYNC_WINDOW_BLOCKS: u32 = 375;
-/// Backlog the minimum may keep before playback is moved forward to it.
-const RESYNC_KEEP: usize = 2 * FRAMES_PER_BLOCK_USIZE;
+/// Played samples are freed once this many have accumulated.
+const TRIM_AFTER: usize = 48_000;
 
 impl MediaElementSourceNode {
     pub fn new(channel_info: ChannelInfo) -> Self {
-        let buffers = Arc::new(Mutex::new(Vec::new()));
+        let delivered = Arc::new(Mutex::new(Delivered::default()));
         let renderer = Arc::new(Mutex::new(MediaElementSourceNodeRenderer::new(
-            buffers.clone(),
+            delivered.clone(),
         )));
         Self {
             channel_info,
             renderer,
-            buffers,
+            delivered,
             playback_offset: 0,
-            backlog_min: usize::MAX,
-            window_blocks: 0,
         }
     }
 
@@ -60,36 +62,47 @@ impl MediaElementSourceNode {
             },
         }
     }
-}
 
-impl MediaElementSourceNode {
-    /// The media element delivers audio on its own clock while this node
-    /// plays it on the context's.  If the context clock stalls (the audio
-    /// output could not run for a while), the backlog grows and would stay,
-    /// leaving the audio permanently behind the video.  Once a second, if the
-    /// backlog never dropped to a small value, skip forward to it; and free
-    /// the samples already played.
-    fn keep_in_sync(&mut self, buffers: &mut [Vec<f32>]) {
-        let len = buffers[0].len();
-        let backlog = len.saturating_sub(self.playback_offset);
-        self.backlog_min = self.backlog_min.min(backlog);
-        self.window_blocks += 1;
-        if self.window_blocks < RESYNC_WINDOW_BLOCKS {
+    /// Free played samples, keeping the time anchor valid.
+    fn trim(&mut self, delivered: &mut Delivered) {
+        if self.playback_offset < TRIM_AFTER {
             return;
         }
-        self.window_blocks = 0;
-        if self.backlog_min > RESYNC_KEEP {
-            let skip = self.backlog_min - RESYNC_KEEP;
-            log::info!("media element audio: skipping {skip} samples to catch up with its source");
-            self.playback_offset += skip;
+        let drain = self.playback_offset.min(delivered.channels[0].len());
+        for buffer in delivered.channels.iter_mut() {
+            buffer.drain(..drain);
         }
-        self.backlog_min = usize::MAX;
-        if self.playback_offset > 0 {
-            for buffer in buffers.iter_mut() {
-                buffer.drain(..self.playback_offset.min(buffer.len()));
+        if let Some((_, index)) = delivered.anchor.as_mut() {
+            *index -= drain as i64;
+        }
+        self.playback_offset -= drain;
+    }
+
+    /// Copy `count` samples from `start` (which may be before the beginning
+    /// or past the end of what was delivered: those are silence) into a block.
+    fn block_from(delivered: &Delivered, start: i64, count: usize) -> Block {
+        let chans = delivered.channels.len() as u8;
+        let len = delivered.channels[0].len() as i64;
+        let (first, last) = (start.max(0), (start + count as i64).min(len));
+        if first == start && last == start + count as i64 {
+            let mut block = Block::empty();
+            for chan in &delivered.channels {
+                block.push_chan(&chan[first as usize..last as usize]);
             }
-            self.playback_offset = 0;
+            return block;
         }
+        let mut block = Block::default();
+        block.repeat(chans);
+        block.explicit_repeat();
+        if first < last {
+            for (c, chan) in delivered.channels.iter().enumerate() {
+                let data = block.data_chan_mut(c as u8);
+                let offset = (first - start) as usize;
+                data[offset..offset + (last - first) as usize]
+                    .copy_from_slice(&chan[first as usize..last as usize]);
+            }
+        }
+        block
     }
 }
 
@@ -98,51 +111,32 @@ impl AudioNodeEngine for MediaElementSourceNode {
         AudioNodeType::MediaElementSourceNode
     }
 
-    fn process(&mut self, mut inputs: Chunk, _info: &BlockInfo) -> Chunk {
+    fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.is_empty());
 
-        let shared = self.buffers.clone();
-        let mut buffers = shared.lock().unwrap();
-        let chans = buffers.len() as u8;
-
-        if chans == 0 {
+        let shared = self.delivered.clone();
+        let mut delivered = shared.lock().unwrap();
+        if delivered.channels.is_empty() {
             inputs.blocks.push(Default::default());
             return inputs;
         }
+        self.trim(&mut delivered);
 
-        self.keep_in_sync(&mut buffers);
-        let len = buffers[0].len();
-
-        let frames_per_block = FRAMES_PER_BLOCK.0 as usize;
-        let samples_to_copy = if self.playback_offset + frames_per_block > len {
-            len - self.playback_offset
-        } else {
-            frames_per_block
+        let start = match (info.media_time, delivered.anchor) {
+            // The sink plays on a clock the media timestamps relate to: take
+            // the samples meant for the time this block will be heard.  Late
+            // samples are skipped, early ones waited for, so the audio stays
+            // with its video through stalls and codec block sizes alike.
+            (Some(media_time), Some((anchor_time, anchor_index))) => {
+                let offset = (media_time as f64 - anchor_time as f64) * info.sample_rate as f64 / 1e9;
+                anchor_index + offset.round() as i64
+            },
+            // Otherwise play what was delivered, in order.
+            _ => self.playback_offset as i64,
         };
-        let next_offset = self.playback_offset + samples_to_copy;
-        if samples_to_copy == FRAMES_PER_BLOCK.0 as usize {
-            // copy entire chan
-            let mut block = Block::empty();
-            for chan in 0..chans {
-                block.push_chan(&buffers[chan as usize][self.playback_offset..next_offset]);
-            }
-            inputs.blocks.push(block)
-        } else {
-            // silent fill and copy
-            let mut block = Block::default();
-            block.repeat(chans);
-            block.explicit_repeat();
-            for chan in 0..chans {
-                let data = block.data_chan_mut(chan);
-                let (_, data) = data.split_at_mut(0);
-                let (data, _) = data.split_at_mut(samples_to_copy);
-                data.copy_from_slice(&buffers[chan as usize][self.playback_offset..next_offset]);
-            }
-            inputs.blocks.push(block)
-        }
-
-        self.playback_offset = next_offset;
-
+        let block = Self::block_from(&delivered, start, FRAMES_PER_BLOCK_USIZE);
+        inputs.blocks.push(block);
+        self.playback_offset = (start + FRAMES_PER_BLOCK_USIZE as i64).max(0) as usize;
         inputs
     }
 
@@ -154,30 +148,35 @@ impl AudioNodeEngine for MediaElementSourceNode {
 }
 
 struct MediaElementSourceNodeRenderer {
-    buffers: Arc<Mutex<Vec<Vec<f32>>>>,
+    delivered: Arc<Mutex<Delivered>>,
     channels: HashMap<u32, usize>,
 }
 
 impl MediaElementSourceNodeRenderer {
-    pub fn new(buffers: Arc<Mutex<Vec<Vec<f32>>>>) -> Self {
+    pub fn new(delivered: Arc<Mutex<Delivered>>) -> Self {
         Self {
-            buffers,
+            delivered,
             channels: HashMap::new(),
         }
     }
 }
 
 impl AudioRenderer for MediaElementSourceNodeRenderer {
-    fn render(&mut self, sample: Box<dyn AsRef<[f32]>>, channel_pos: u32) {
+    fn render(&mut self, sample: Box<dyn AsRef<[f32]>>, channel_pos: u32, present_at: Option<u64>) {
+        let mut delivered = self.delivered.lock().unwrap();
         let channel = match self.channels.entry(channel_pos) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
-                let mut buffers = self.buffers.lock().unwrap();
-                let len = buffers.len();
-                buffers.resize(len + 1, Vec::new());
-                *entry.insert(buffers.len())
+                delivered.channels.push(Vec::new());
+                *entry.insert(delivered.channels.len())
             },
         };
-        self.buffers.lock().unwrap()[channel - 1].extend_from_slice((*sample).as_ref());
+        if channel == 1 && delivered.anchor.is_none() {
+            if let Some(present_at) = present_at {
+                let index = delivered.channels[0].len() as i64;
+                delivered.anchor = Some((present_at, index));
+            }
+        }
+        delivered.channels[channel - 1].extend_from_slice((*sample).as_ref());
     }
 }

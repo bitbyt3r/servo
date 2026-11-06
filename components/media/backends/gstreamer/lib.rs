@@ -333,7 +333,7 @@ impl AudioBackend for GStreamerBackend {
     fn make_decoder() -> Box<dyn AudioDecoder> {
         Box::new(audio_decoder::GStreamerAudioDecoder::new())
     }
-    fn make_sink() -> Result<Self::Sink, AudioSinkError> {
+    fn make_sink(_: &ClientContextId) -> Result<Self::Sink, AudioSinkError> {
         audio_sink::GStreamerAudioSink::new()
     }
 

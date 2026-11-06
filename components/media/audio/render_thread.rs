@@ -152,8 +152,11 @@ impl AudioRenderThread {
         sample_rate: f32,
         graph: AudioGraph,
         options: AudioContextOptions,
+        client_context_id: servo_media_traits::ClientContextId,
     ) -> Result<Self, AudioSinkError> {
-        let sink_factory = Box::new(|| B::make_sink().map(|s| Box::new(s) as Box<dyn AudioSink>));
+        let sink_factory = Box::new(move || {
+            B::make_sink(&client_context_id).map(|s| Box::new(s) as Box<dyn AudioSink>)
+        });
         let reader_factory = Box::new(|id, sample_rate| B::make_streamreader(id, sample_rate));
         let sink = match options {
             AudioContextOptions::RealTimeAudioContext(_) => Sink::RealTime(sink_factory()?),
@@ -186,9 +189,16 @@ impl AudioRenderThread {
         sample_rate: f32,
         graph: AudioGraph,
         options: AudioContextOptions,
+        client_context_id: servo_media_traits::ClientContextId,
         init_sender: Sender<Result<(), AudioSinkError>>,
     ) {
-        let mut thread = match Self::prepare_thread::<B>(sender, sample_rate, graph, options) {
+        let mut thread = match Self::prepare_thread::<B>(
+            sender,
+            sample_rate,
+            graph,
+            options,
+            client_context_id,
+        ) {
             Ok(thread) => {
                 let _ = init_sender.send(Ok(()));
                 thread
@@ -273,10 +283,15 @@ impl AudioRenderThread {
             return Chunk::explicit_silence();
         }
 
+        let media_time = match self.sink {
+            Sink::RealTime(ref sink) => sink.media_time_for_next_block(),
+            Sink::Offline(_) => None,
+        };
         let info = BlockInfo {
             sample_rate: self.sample_rate,
             frame: self.current_frame,
             time: self.current_time,
+            media_time,
         };
         self.graph.process(&info)
     }

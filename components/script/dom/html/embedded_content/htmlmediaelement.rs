@@ -2281,9 +2281,8 @@ impl HTMLMediaElement {
 
         let audio_renderer = self.audio_renderer.borrow().as_ref().cloned();
 
-        let pipeline_id = window.pipeline_id();
         let client_context_id =
-            ClientContextId::build(pipeline_id.namespace_id.0, pipeline_id.index.0.get());
+            crate::dom::audio::baseaudiocontext::client_context_id_for(window.webview_id());
 
         // This player id will be set later when we have a player.
         // The callback will be the only valid user after this function.

@@ -166,6 +166,7 @@ impl AudioContext {
         let listener = graph.listener_id();
 
         let (init_sender, init_receiver) = mpsc::channel();
+        let sink_client = *client_context_id;
         Builder::new()
             .name("AudioRenderThread".to_owned())
             .spawn(move || {
@@ -175,6 +176,7 @@ impl AudioContext {
                     sample_rate,
                     graph,
                     options,
+                    sink_client,
                     init_sender,
                 )
             })

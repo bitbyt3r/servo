@@ -12,7 +12,7 @@ use js::realm::CurrentRealm;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
-use servo_base::id::PipelineId;
+use servo_base::id::WebViewId;
 use servo_media::audio::context::OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions;
 
 use crate::dom::audio::audiobuffer::{AudioBuffer, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
@@ -48,7 +48,7 @@ impl OfflineAudioContext {
         channel_count: u32,
         length: u32,
         sample_rate: f32,
-        pipeline_id: PipelineId,
+        webview_id: WebViewId,
     ) -> Fallible<OfflineAudioContext> {
         let options = ServoMediaOfflineAudioContextOptions {
             channels: channel_count as u8,
@@ -57,7 +57,7 @@ impl OfflineAudioContext {
         };
         let context = BaseAudioContext::new_inherited(
             BaseAudioContextOptions::OfflineAudioContext(options),
-            pipeline_id,
+            webview_id,
         )?;
         Ok(OfflineAudioContext {
             context,
@@ -86,9 +86,9 @@ impl OfflineAudioContext {
                 "Invalid number of channels, length or sample rate".into(),
             )));
         }
-        let pipeline_id = window.pipeline_id();
+        let webview_id = window.webview_id();
         let context =
-            OfflineAudioContext::new_inherited(channel_count, length, sample_rate, pipeline_id)?;
+            OfflineAudioContext::new_inherited(channel_count, length, sample_rate, webview_id)?;
         Ok(reflect_dom_object_with_proto(
             cx,
             Box::new(context),

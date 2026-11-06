@@ -36,4 +36,11 @@ pub trait AudioSink: Send {
     fn has_enough_data(&self) -> bool;
     fn push_data(&self, chunk: Chunk) -> Result<(), AudioSinkError>;
     fn set_eos_callback(&self, callback: SinkEosCallback);
+    /// The presentation time (CLOCK_MONOTONIC ns) that media samples rendered
+    /// into the next block pushed to this sink should have: when that block
+    /// will be heard, minus whatever latency the sink reserves for media.
+    /// `None` when the sink has no such clock; media then plays as delivered.
+    fn media_time_for_next_block(&self) -> Option<u64> {
+        None
+    }
 }

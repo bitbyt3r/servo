@@ -52,7 +52,11 @@ pub mod wave_shaper_node;
 pub trait AudioBackend {
     type Sink: sink::AudioSink + 'static;
     fn make_decoder() -> Box<dyn decoder::AudioDecoder>;
-    fn make_sink() -> Result<Self::Sink, sink::AudioSinkError>;
+    /// The sink for the audio context of the given client (tab); a backend
+    /// may route each client's audio somewhere else.
+    fn make_sink(
+        client_context_id: &servo_media_traits::ClientContextId,
+    ) -> Result<Self::Sink, sink::AudioSinkError>;
     fn make_streamreader(
         id: servo_media_streams::MediaStreamId,
         sample_rate: f32,

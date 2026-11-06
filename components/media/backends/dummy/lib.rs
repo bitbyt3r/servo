@@ -128,7 +128,7 @@ impl AudioBackend for DummyBackend {
         Box::new(DummyAudioDecoder)
     }
 
-    fn make_sink() -> Result<Self::Sink, AudioSinkError> {
+    fn make_sink(_: &ClientContextId) -> Result<Self::Sink, AudioSinkError> {
         Ok(DummyAudioSink)
     }
     fn make_streamreader(

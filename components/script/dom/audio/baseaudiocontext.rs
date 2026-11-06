@@ -30,7 +30,17 @@ use script_bindings::codegen::GenericBindings::OscillatorNodeBinding::Oscillator
 use script_bindings::codegen::GenericBindings::PannerNodeBinding::PannerNodeMethods;
 use script_bindings::codegen::GenericBindings::PeriodicWaveBinding::PeriodicWaveMethods;
 use script_bindings::codegen::GenericBindings::StereoPannerNodeBinding::StereoPannerNodeMethods;
-use servo_base::id::PipelineId;
+use servo_base::id::{BrowsingContextId, WebViewId};
+
+/// Media instances are tracked per tab: the id is the webview's browsing
+/// context, so an embedder can tell which page a context belongs to.
+pub(crate) fn client_context_id_for(webview_id: WebViewId) -> ClientContextId {
+    let browsing_context = BrowsingContextId::from(webview_id);
+    ClientContextId::build(
+        browsing_context.namespace_id.0,
+        browsing_context.index.0.get(),
+    )
+}
 use servo_media::audio::context::{
     AudioContext, AudioContextOptions, OfflineAudioContextOptions, ProcessingState,
     RealTimeAudioContextOptions,
@@ -137,7 +147,7 @@ pub(crate) struct BaseAudioContext {
 impl BaseAudioContext {
     pub(crate) fn new_inherited(
         options: BaseAudioContextOptions,
-        pipeline_id: PipelineId,
+        webview_id: WebViewId,
     ) -> Fallible<BaseAudioContext> {
         let (sample_rate, channel_count) = match options {
             BaseAudioContextOptions::AudioContext(ref opt) => (opt.sample_rate, 2),
@@ -146,8 +156,7 @@ impl BaseAudioContext {
             },
         };
 
-        let client_context_id =
-            ClientContextId::build(pipeline_id.namespace_id.0, pipeline_id.index.0.get());
+        let client_context_id = client_context_id_for(webview_id);
         let audio_context_impl = ServoMedia::get()
             .create_audio_context(&client_context_id, options.convert())
             .map_err(|_| Error::NotSupported(Some("Failed to create audio context".into())))?;

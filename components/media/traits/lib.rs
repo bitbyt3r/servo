@@ -12,6 +12,13 @@ use malloc_size_of_derive::MallocSizeOf;
 pub struct ClientContextId(u32, NonZeroU32);
 
 impl ClientContextId {
+    /// The two numbers this id was built from.
+    pub fn parts(&self) -> (u32, u32) {
+        (self.0, self.1.get())
+    }
+}
+
+impl ClientContextId {
     pub fn build(a: u32, b: u32) -> ClientContextId {
         ClientContextId(a, NonZeroU32::new(b).unwrap())
     }
