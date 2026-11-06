@@ -562,6 +562,14 @@ impl GStreamerPlayer {
             pipeline.set_property("audio-sink", &audio_sink);
 
             let audio_sink = audio_sink.dynamic_cast::<gstreamer_app::AppSink>().unwrap();
+            // The renderer wants f32 samples, one slice per channel; let the
+            // pipeline convert whatever the decoder produces.
+            audio_sink.set_caps(Some(
+                &gstreamer_audio::AudioCapsBuilder::new()
+                    .format(gstreamer_audio::AUDIO_FORMAT_F32)
+                    .layout(gstreamer_audio::AudioLayout::Interleaved)
+                    .build(),
+            ));
 
             let weak_audio_renderer = Arc::downgrade(audio_renderer);
 
@@ -584,18 +592,24 @@ impl GStreamerPlayer {
                             return Err(gstreamer::FlowError::Flushing);
                         };
 
-                        for position in positions.iter() {
-                            let buffer = buffer.clone();
-                            let map = match buffer.into_mapped_buffer_readable() {
-                                Ok(map) => map,
-                                _ => {
-                                    return Err(gstreamer::FlowError::Error);
-                                },
-                            };
-                            let chunk = Box::new(GStreamerAudioChunk(map));
+                        let map = buffer
+                            .into_mapped_buffer_readable()
+                            .map_err(|_| gstreamer::FlowError::Error)?;
+                        let samples = GStreamerAudioChunk(map);
+                        let interleaved = samples.as_ref();
+                        let channels = positions.len().max(1);
+                        for (index, position) in positions.iter().enumerate() {
+                            let planar: Vec<f32> = interleaved
+                                .iter()
+                                .skip(index)
+                                .step_by(channels)
+                                .copied()
+                                .collect();
                             let channel = position.to_mask() as u32;
-
-                            audio_renderer.lock().unwrap().render(chunk, channel);
+                            audio_renderer
+                                .lock()
+                                .unwrap()
+                                .render(Box::new(planar), channel);
                         }
                         Ok(gstreamer::FlowSuccess::Ok)
                     })
