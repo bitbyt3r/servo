@@ -24,6 +24,9 @@ pub struct VideoFrame {
     data: VideoFrameData,
     #[ignore_malloc_size_of = "Difficult"]
     _buffer: Arc<dyn Buffer>,
+    /// When this frame is meant to be shown, in CLOCK_MONOTONIC nanoseconds,
+    /// if the backend knows.
+    present_at: Option<u64>,
 }
 
 impl VideoFrame {
@@ -34,7 +37,17 @@ impl VideoFrame {
             height,
             data,
             _buffer: buffer,
+            present_at: None,
         })
+    }
+
+    pub fn with_present_at(mut self, present_at: Option<u64>) -> Self {
+        self.present_at = present_at;
+        self
+    }
+
+    pub fn present_at(&self) -> Option<u64> {
+        self.present_at
     }
 
     pub fn get_width(&self) -> i32 {

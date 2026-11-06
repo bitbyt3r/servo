@@ -738,6 +738,15 @@ impl WebView {
         self.servo().paint().mark_embedder_textures_dirty(self.id(), ids)
     }
 
+    /// Show the media frames whose presentation time is at or before
+    /// `target` (CLOCK_MONOTONIC nanoseconds); see
+    /// `ServoBuilder::present_media_frames_on_demand`.  Returns how many
+    /// images changed; wait for [`Self::has_pending_frames`] to clear before
+    /// painting.
+    pub fn present_media_frames(&self, target: u64) -> usize {
+        self.servo().paint().present_media_frames(self.id(), target)
+    }
+
     /// Whether frames requested from WebRender are still being built.  An
     /// embedder painting on its own clock waits for this to clear after
     /// [`Self::mark_embedder_textures_dirty`], so that [`Self::paint`] shows

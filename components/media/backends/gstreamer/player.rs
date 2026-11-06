@@ -792,10 +792,11 @@ impl GStreamerPlayer {
                 let observer = self.observer.clone();
                 let weak_video_renderer = Arc::downgrade(&video_renderer);
 
-                move |sample: gstreamer::Sample| {
+                move |sample: gstreamer::Sample, present_at: Option<u64>| {
                     let Some(frame) = render.lock().unwrap().get_frame_from_sample(sample) else {
                         return Err(gstreamer::FlowError::Error);
                     };
+                    let frame = frame.with_present_at(present_at);
 
                     match weak_video_renderer.upgrade() {
                         Some(video_renderer) => {
@@ -811,25 +812,33 @@ impl GStreamerPlayer {
                 }
             };
 
+            // When a sample is meant to be shown: pipeline base time plus its
+            // timestamp, on the system (monotonic) clock.
+            let present_at = |sink: &gstreamer_app::AppSink, sample: &gstreamer::Sample| {
+                let pts = sample.buffer().and_then(|buffer| buffer.pts())?;
+                let base = sink.base_time()?;
+                Some(base.nseconds() + pts.nseconds())
+            };
+
             // Set video_sink callbacks.
             inner.lock().unwrap().video_sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll({
                         let render_sample = render_sample.clone();
                         move |video_sink| {
-                            render_sample(
-                                video_sink
-                                    .pull_preroll()
-                                    .map_err(|_| gstreamer::FlowError::Eos)?,
-                            )
+                            let sample = video_sink
+                                .pull_preroll()
+                                .map_err(|_| gstreamer::FlowError::Eos)?;
+                            let at = present_at(video_sink, &sample);
+                            render_sample(sample, at)
                         }
                     })
                     .new_sample(move |video_sink| {
-                        render_sample(
-                            video_sink
-                                .pull_sample()
-                                .map_err(|_| gstreamer::FlowError::Eos)?,
-                        )
+                        let sample = video_sink
+                            .pull_sample()
+                            .map_err(|_| gstreamer::FlowError::Eos)?;
+                        let at = present_at(video_sink, &sample);
+                        render_sample(sample, at)
                     })
                     .build(),
             );

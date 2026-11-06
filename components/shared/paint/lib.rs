@@ -732,6 +732,10 @@ pub enum ImageUpdate {
     ),
     /// Delete a previously registered image registration.
     DeleteImage(ImageKey),
+    /// Update an existing image registration when the given CLOCK_MONOTONIC
+    /// time (nanoseconds) comes, if the embedder presents media frames on its
+    /// own clock; otherwise right away.
+    PresentImageAt(ImageKey, ImageDescriptor, SerializableImageData, u64),
     /// Update an existing image registration.
     UpdateImage(
         ImageKey,
@@ -754,6 +758,12 @@ impl Debug for ImageUpdate {
                 .field(is_animated_image)
                 .finish(),
             Self::DeleteImage(image_key) => f.debug_tuple("DeleteImage").field(image_key).finish(),
+            Self::PresentImageAt(image_key, image_desc, _, present_at) => f
+                .debug_tuple("PresentImageAt")
+                .field(image_key)
+                .field(image_desc)
+                .field(present_at)
+                .finish(),
             Self::UpdateImage(image_key, image_desc, _, epoch) => f
                 .debug_tuple("UpdateImage")
                 .field(image_key)

@@ -1067,6 +1067,7 @@ impl Servo {
             shutdown_state: shutdown_state.clone(),
             event_loop_waker: event_loop_waker.clone(),
             embedder_textures: builder.embedder_textures,
+            present_media_on_demand: builder.present_media_on_demand,
         });
 
         let protocols = Arc::new(protocols);
@@ -1543,6 +1544,7 @@ pub struct ServoBuilder {
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
     embedder_textures: Option<Arc<dyn EmbedderTextures>>,
+    present_media_on_demand: bool,
 }
 
 impl Default for ServoBuilder {
@@ -1553,6 +1555,7 @@ impl Default for ServoBuilder {
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
             embedder_textures: None,
+            present_media_on_demand: false,
         }
     }
 }
@@ -1586,6 +1589,14 @@ impl ServoBuilder {
     /// [`EmbedderTextures`].
     pub fn embedder_textures(mut self, textures: Arc<dyn EmbedderTextures>) -> Self {
         self.embedder_textures = Some(textures);
+        self
+    }
+
+    /// Present media (video element) frames only when the embedder calls
+    /// [`WebView::present_media_frames`], on its own clock, rather than as
+    /// they arrive.
+    pub fn present_media_frames_on_demand(mut self) -> Self {
+        self.present_media_on_demand = true;
         self
     }
 }

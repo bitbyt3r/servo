@@ -155,6 +155,11 @@ pub(crate) struct Painter {
     /// so that their picture-cache tiles can be invalidated on request.
     embedder_textures: FxHashMap<ExternalImageId, (ImageKey, ImageDescriptor, ExternalImageData)>,
 
+    /// Image updates (video frames) waiting for their presentation time,
+    /// oldest first, when the embedder presents media frames on its own clock.
+    timed_images: FxHashMap<ImageKey, Vec<(u64, ImageDescriptor, SerializableImageData)>>,
+    present_media_on_demand: bool,
+
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
     web_content_animator: WebContentAnimator,
@@ -326,6 +331,8 @@ impl Painter {
             frame_delayer: Default::default(),
             animation_image_cache: FxHashMap::default(),
             embedder_textures: FxHashMap::default(),
+            timed_images: FxHashMap::default(),
+            present_media_on_demand: paint.present_media_on_demand,
             web_content_animator: WebContentAnimator::new(
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
@@ -1209,6 +1216,27 @@ impl Painter {
         marked
     }
 
+    /// Apply, for every image with timed updates, the newest update whose
+    /// presentation time is at or before `target` (CLOCK_MONOTONIC ns),
+    /// dropping the ones it supersedes, and build a frame if anything
+    /// changed.  Returns how many images were updated.
+    pub(crate) fn present_timed_images(&mut self, target: u64) -> usize {
+        let mut txn = Transaction::new();
+        let mut presented = 0;
+        for (key, queue) in self.timed_images.iter_mut() {
+            let due = queue.iter().rposition(|(at, ..)| *at <= target);
+            let Some(index) = due else { continue };
+            let (_, desc, data) = queue.drain(..=index).last().unwrap();
+            txn.update_image(*key, desc, data.into(), &DirtyRect::All);
+            presented += 1;
+        }
+        if presented > 0 {
+            self.generate_frame(&mut txn, RenderReasons::ANIMATED_PROPERTY);
+            self.send_transaction(txn);
+        }
+        presented
+    }
+
     pub(crate) fn update_images(&mut self, updates: SmallVec<[ImageUpdate; 1]>) {
         let mut txn = Transaction::new();
         for update in updates {
@@ -1234,12 +1262,26 @@ impl Painter {
                     self.frame_delayer.delete_image(key);
                     self.animation_image_cache.remove(&key);
                     self.embedder_textures.retain(|_, (k, ..)| *k != key);
+                    self.timed_images.remove(&key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
                     if let Some(epoch) = epoch {
                         self.frame_delayer.update_image(key, epoch);
                     }
                     txn.update_image(key, desc, data.into(), &DirtyRect::All)
+                },
+                ImageUpdate::PresentImageAt(key, desc, data, present_at) => {
+                    if self.present_media_on_demand {
+                        let queue = self.timed_images.entry(key).or_default();
+                        queue.push((present_at, desc, data));
+                        // A source running far ahead of presentation keeps
+                        // only its newest frames.
+                        if queue.len() > 8 {
+                            queue.remove(0);
+                        }
+                    } else {
+                        txn.update_image(key, desc, data.into(), &DirtyRect::All)
+                    }
                 },
                 ImageUpdate::UpdateImageForAnimation(image_key, desc) => {
                     let Some(image) = self.animation_image_cache.get(&image_key) else {

@@ -249,14 +249,23 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                     current_frame.height == frame.get_height() =>
             {
                 if !frame.is_gl_texture() {
-                    updates.push(ImageUpdate::UpdateImage(
-                        current_frame.image_key,
-                        descriptor,
-                        SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                            frame.get_data(),
-                        )),
-                        None,
+                    let data = SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
+                        frame.get_data(),
                     ));
+                    updates.push(match frame.present_at() {
+                        Some(at) => ImageUpdate::PresentImageAt(
+                            current_frame.image_key,
+                            descriptor,
+                            data,
+                            at,
+                        ),
+                        None => ImageUpdate::UpdateImage(
+                            current_frame.image_key,
+                            descriptor,
+                            data,
+                            None,
+                        ),
+                    });
                 }
 
                 self.current_frame_holder

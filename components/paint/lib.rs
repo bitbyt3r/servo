@@ -56,4 +56,8 @@ pub struct InitialPaintState {
     pub event_loop_waker: Box<dyn EventLoopWaker>,
     /// Textures the embedder makes available to pages, if any.
     pub embedder_textures: Option<Arc<dyn EmbedderTextures>>,
+    /// Whether the embedder presents media frames itself, by calling
+    /// `WebView::present_media_frames` on its own clock; otherwise frames
+    /// are shown as they arrive.
+    pub present_media_on_demand: bool,
 }
