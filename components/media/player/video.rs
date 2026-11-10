@@ -11,6 +11,11 @@ pub enum VideoFrameData {
     Raw(#[conditional_malloc_size_of] Arc<Vec<u8>>),
     Texture(u32),
     OESTexture(u32),
+    /// The pixels stay on the GPU: the embedder supplies them at composite
+    /// time as the texture of this WebRender external image id (see
+    /// `embedder_traits::EmbedderTextures`).  Frames like this come from an
+    /// embedder-installed video output (`servo_media_gstreamer::set_video_output`).
+    External(u64),
 }
 
 pub trait Buffer: Send + Sync {
@@ -81,6 +86,19 @@ impl VideoFrame {
 
     pub fn is_external_oes(&self) -> bool {
         matches!(self.data, VideoFrameData::OESTexture(_))
+    }
+
+    /// Whether the pixels are in memory (`get_data`).
+    pub fn is_raw(&self) -> bool {
+        matches!(self.data, VideoFrameData::Raw(_))
+    }
+
+    /// The WebRender external image id of an embedder-supplied frame.
+    pub fn external_image_id(&self) -> Option<u64> {
+        match self.data {
+            VideoFrameData::External(id) => Some(id),
+            _ => None,
+        }
     }
 }
 

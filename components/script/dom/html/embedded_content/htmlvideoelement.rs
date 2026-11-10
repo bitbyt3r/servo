@@ -149,7 +149,7 @@ impl HTMLVideoElement {
         match self.last_frame.borrow().as_ref() {
             Some(frame) => {
                 let size = Size2D::new(frame.get_width() as u32, frame.get_height() as u32);
-                if !frame.is_gl_texture() {
+                if frame.is_raw() {
                     let alpha_mode = SnapshotAlphaMode::Transparent {
                         premultiplied: false,
                     };
@@ -161,7 +161,8 @@ impl HTMLVideoElement {
                         frame.get_data().to_vec(),
                     ))
                 } else {
-                    // XXX(victor): here we only have the GL texture ID.
+                    // XXX(victor): here we only have the GL texture ID (or,
+                    // for an embedder-supplied frame, its external image id).
                     Some(Snapshot::cleared(size.cast()))
                 }
             },

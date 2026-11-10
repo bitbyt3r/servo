@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use glib::prelude::*;
 use servo_media_gstreamer_render::Render;
@@ -91,15 +91,50 @@ impl Buffer for GStreamerBuffer {
     }
 }
 
+/// A video output the embedder installs for all players, for instance to
+/// keep decoded frames on the GPU.  Players that get one from
+/// [`VideoOutput::new_player`] do not use the GL render.
+pub trait VideoOutput: Send + Sync {
+    /// The output of a new player, or `None` for the default one.
+    fn new_player(&self) -> Option<Box<dyn PlayerVideoOutput>>;
+}
+
+/// One player's embedder video output.
+pub trait PlayerVideoOutput: Send {
+    /// Set `pipeline`'s video sink, built around `appsink` (whose callbacks
+    /// the player installs).  Returns false to use the default sink.
+    fn setup_video_sink(
+        &self,
+        appsink: &gstreamer_app::AppSink,
+        pipeline: &gstreamer::Element,
+    ) -> bool;
+
+    /// The frame for a sample, or `None` to map it into memory as usual.
+    fn frame(&self, sample: &gstreamer::Sample) -> Option<VideoFrame>;
+}
+
+static VIDEO_OUTPUT: OnceLock<Box<dyn VideoOutput>> = OnceLock::new();
+
+/// Install the embedder's video output.  Must happen before the first player
+/// is created; returns false if one is already installed.
+pub fn set_video_output(output: Box<dyn VideoOutput>) -> bool {
+    VIDEO_OUTPUT.set(output).is_ok()
+}
+
 pub struct GStreamerRender {
     render: Option<platform::Render>,
+    output: Option<Box<dyn PlayerVideoOutput>>,
 }
 
 impl GStreamerRender {
     pub fn new(gl_context: Box<dyn PlayerGLContext>) -> Self {
-        GStreamerRender {
-            render: platform::create_render(gl_context),
-        }
+        let output = VIDEO_OUTPUT.get().and_then(|output| output.new_player());
+        let render = if output.is_some() {
+            None
+        } else {
+            platform::create_render(gl_context)
+        };
+        GStreamerRender { render, output }
     }
 
     pub fn is_gl(&self) -> bool {
@@ -111,6 +146,11 @@ impl GStreamerRender {
     }
 
     pub fn get_frame_from_sample(&self, sample: gstreamer::Sample) -> Option<VideoFrame> {
+        if let Some(output) = self.output.as_ref() &&
+            let Some(frame) = output.frame(&sample)
+        {
+            return Some(frame);
+        }
         if let Some(render) = self.render.as_ref() {
             render.build_frame(sample)
         } else {
@@ -136,6 +176,12 @@ impl GStreamerRender {
             .map_err(|error| PlayerError::Backend(format!("appsink creation failed: {error:?}")))?
             .downcast::<gstreamer_app::AppSink>()
             .unwrap();
+
+        if let Some(output) = self.output.as_ref() &&
+            output.setup_video_sink(&appsink, pipeline)
+        {
+            return Ok(appsink);
+        }
 
         if let Some(render) = self.render.as_ref() {
             render.build_video_sink(appsink.upcast_ref::<gstreamer::Element>(), pipeline)?

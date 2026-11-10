@@ -13,6 +13,7 @@ mod media_stream_source;
 pub mod player;
 mod registry_scanner;
 mod render;
+pub use render::{PlayerVideoOutput, VideoOutput, set_video_output};
 mod source;
 pub mod webrtc;
 

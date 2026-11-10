@@ -220,6 +220,19 @@ impl Drop for MediaFrameRenderer {
     }
 }
 
+/// The image data of a frame whose pixels the embedder supplies at composite
+/// time, as a WebRender external image (routed to the embedder's textures).
+fn embedder_image_data(frame: &VideoFrame) -> Option<SerializableImageData> {
+    frame.external_image_id().map(|id| {
+        SerializableImageData::External(ExternalImageData {
+            id: ExternalImageId(id),
+            channel_index: 0,
+            image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+            normalized_uvs: false,
+        })
+    })
+}
+
 impl VideoFrameRenderer for MediaFrameRenderer {
     fn render(&mut self, frame: VideoFrame) {
         if self.player_id.is_none() ||
@@ -249,9 +262,11 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                     current_frame.height == frame.get_height() =>
             {
                 if !frame.is_gl_texture() {
-                    let data = SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                        frame.get_data(),
-                    ));
+                    let data = embedder_image_data(&frame).unwrap_or_else(|| {
+                        SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
+                            frame.get_data(),
+                        ))
+                    });
                     updates.push(match frame.present_at() {
                         Some(at) => ImageUpdate::PresentImageAt(
                             current_frame.image_key,
@@ -310,6 +325,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                             normalized_uvs: false,
                         })
                     })
+                    .or_else(|| embedder_image_data(&frame))
                     .unwrap_or_else(|| {
                         SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
                             frame.get_data(),
@@ -358,6 +374,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                             normalized_uvs: false,
                         })
                     })
+                    .or_else(|| embedder_image_data(&frame))
                     .unwrap_or_else(|| {
                         SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
                             frame.get_data(),

@@ -592,10 +592,9 @@ impl GStreamerPlayer {
                             return Err(gstreamer::FlowError::Flushing);
                         };
 
-                        let present_at = buffer
-                            .pts()
+                        let present_at = running_time(&sample, buffer.pts())
                             .zip(audio_sink.base_time())
-                            .map(|(pts, base)| base.nseconds() + pts.nseconds());
+                            .map(|(running, base)| base.nseconds() + running.nseconds());
                         let map = buffer
                             .into_mapped_buffer_readable()
                             .map_err(|_| gstreamer::FlowError::Error)?;
@@ -817,11 +816,11 @@ impl GStreamerPlayer {
             };
 
             // When a sample is meant to be shown: pipeline base time plus its
-            // timestamp, on the system (monotonic) clock.
+            // running time, on the system (monotonic) clock.
             let present_at = |sink: &gstreamer_app::AppSink, sample: &gstreamer::Sample| {
-                let pts = sample.buffer().and_then(|buffer| buffer.pts())?;
+                let running = running_time(sample, sample.buffer().and_then(|b| b.pts()))?;
                 let base = sink.base_time()?;
-                Some(base.nseconds() + pts.nseconds())
+                Some(base.nseconds() + running.nseconds())
             };
 
             // Set video_sink callbacks.
@@ -1084,5 +1083,23 @@ impl Drop for GStreamerPlayer {
                 tx_ack,
             });
         let _ = rx_ack.recv();
+    }
+}
+
+/// The running time of a timestamp in the sample's segment: what the pipeline
+/// clock (minus base time) reads when it is due.  Timestamps alone are not
+/// enough: an MPEG-TS cut from a longer stream starts at its original
+/// timestamps (tens of seconds, say), with a segment starting there too.
+fn running_time(
+    sample: &gstreamer::Sample,
+    pts: Option<gstreamer::ClockTime>,
+) -> Option<gstreamer::ClockTime> {
+    let pts = pts?;
+    match sample
+        .segment()
+        .and_then(|segment| segment.downcast_ref::<gstreamer::ClockTime>())
+    {
+        Some(segment) => segment.to_running_time(pts),
+        None => Some(pts),
     }
 }
