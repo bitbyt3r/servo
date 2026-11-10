@@ -5,7 +5,7 @@
 use malloc_size_of_derive::MallocSizeOf;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Chunk, Tick};
+use crate::block::{Chunk, FRAMES_PER_BLOCK, Tick};
 use crate::param::{Param, ParamType};
 
 #[derive(Copy, Clone, Debug, MallocSizeOf)]
@@ -47,6 +47,11 @@ impl AudioNodeEngine for GainNode {
         debug_assert!(inputs.len() == 1);
 
         if inputs.blocks[0].is_silence() {
+            // The gain's timeline runs all the same: a value due while the
+            // input is silent is in force when sound comes.
+            for tick in 0..FRAMES_PER_BLOCK.0 {
+                self.update_parameters(info, Tick(tick));
+            }
             return inputs;
         }
 
@@ -69,5 +74,31 @@ impl AudioNodeEngine for GainNode {
             ParamType::Gain => &mut self.gain,
             _ => panic!("Unknown param {:?} for GainNode", id),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::Block;
+    use crate::param::AutomationEvent;
+
+    #[test]
+    fn the_gain_runs_its_timeline_over_silent_input() {
+        let mut node = GainNode::new(GainNodeOptions { gain: 0. }, ChannelInfo::default());
+        node.get_param(ParamType::Gain)
+            .insert_event(AutomationEvent::SetValueAtTime(1., Tick(300)));
+        for block in 0..4u64 {
+            let mut chunk = Chunk::default();
+            chunk.blocks.push(Block::default());
+            let info = BlockInfo {
+                sample_rate: 48000.,
+                frame: Tick(block * 128),
+                time: 0.,
+                media_time: None,
+            };
+            node.process(chunk, &info);
+        }
+        assert_eq!(node.gain.value(), 1.);
     }
 }

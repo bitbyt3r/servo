@@ -55,6 +55,13 @@ pub struct Param {
     /// If true, `blocks` has been summed together into a single block
     summed: bool,
     dirty: bool,
+    /// The current event is a SetValueAtTime whose value has been set: it
+    /// is set once, on its tick or, when that tick has passed (it was
+    /// scheduled in the past, or its node was not processed then), on the
+    /// first tick after it.
+    applied: bool,
+    /// The last tick the timeline was run for.
+    last_tick: Option<Tick>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, MallocSizeOf)]
@@ -81,6 +88,8 @@ impl Param {
             block_mix_val: 0.,
             summed: false,
             dirty: false,
+            applied: false,
+            last_tick: None,
         }
     }
 
@@ -99,6 +108,8 @@ impl Param {
             block_mix_val: 0.,
             summed: false,
             dirty: false,
+            applied: false,
+            last_tick: None,
         }
     }
 
@@ -159,6 +170,7 @@ impl Param {
         }
 
         let current_tick = block.absolute_tick(tick);
+        self.last_tick = Some(current_tick);
         let mut current_event = &self.events[self.current_event];
 
         // Update then move to next event if necessary.
@@ -191,16 +203,21 @@ impl Param {
                         }
                     }
                 }
-                // Update the value
-                if current_event.run(
-                    &mut self.val,
-                    &mut self.time,
-                    current_tick,
-                    self.event_start_time,
-                    self.event_start_value,
-                ) {
-                    // If at least one event updated the param value, then changed is true.
-                    changed = true;
+                // Update the value. A SetValueAtTime sets it once, so that
+                // the value setter can change it afterwards.
+                let once = matches!(current_event, AutomationEvent::SetValueAtTime(..));
+                if !(once && self.applied) {
+                    if current_event.run(
+                        &mut self.val,
+                        &mut self.time,
+                        current_tick,
+                        self.event_start_time,
+                        self.event_start_value,
+                    ) {
+                        // If at least one event updated the param value, then changed is true.
+                        changed = true;
+                    }
+                    self.applied = once;
                 }
             }
             // Continue to the next event if the next event is active.
@@ -212,6 +229,7 @@ impl Param {
                 )
             {
                 self.current_event += 1;
+                self.applied = false;
                 // If the next event is a ramp, set the param event start value and time.
                 // This is because ramp does not have a start time.
                 if next_event.is_ramp() {
@@ -276,6 +294,15 @@ impl Param {
             Ok(_) => unreachable!(),
             Err(idx) => idx,
         };
+        // > The cancelScheduledValues() method cancels all scheduled parameter
+        // > changes with times greater than or equal to cancelTime.
+        // https://webaudio.github.io/web-audio-api/#dom-audioparam-cancelscheduledvalues
+        // So an event at the cancel time goes too.
+        let idx = if matches!(event, AutomationEvent::CancelScheduledValues(..)) {
+            self.events.partition_point(|e| e.time() < time)
+        } else {
+            idx
+        };
 
         if let Some(is_hold) = event.cancel_event() {
             let mut events_to_keep = idx;
@@ -337,12 +364,29 @@ impl Param {
                     self.time = self.event_start_time;
                 }
             }
+            // The current event may have gone: the next one inserted is
+            // the current one then.
+            if self.current_event >= self.events.len() {
+                self.current_event = self.events.len();
+                self.applied = false;
+            }
             // don't actually insert the event
             return;
         }
+        // An event before the current one that has started is in the past
+        // of the timeline: the current one stays current. Before one that
+        // has not started yet, the new one is the current one.
+        let started = self
+            .events
+            .get(self.current_event)
+            .zip(self.last_tick)
+            .is_some_and(|(e, last)| e.time() <= last);
+        if idx <= self.current_event && started && idx < self.events.len() {
+            self.current_event += 1;
+        } else if idx <= self.current_event {
+            self.applied = false;
+        }
         self.events.insert(idx, event);
-        // XXXManishearth handle inserting events with a time before that
-        // of the current one
     }
 
     pub(crate) fn add_block(&mut self, block: Block) {
@@ -542,7 +586,9 @@ impl AutomationEvent {
         next_event: Option<&AutomationEvent>,
     ) -> bool {
         match self {
-            AutomationEvent::SetValueAtTime(_, time) => *time == current_tick,
+            // From its tick on: one scheduled in the past applies at once
+            // (it is set only once, see `Param::update`).
+            AutomationEvent::SetValueAtTime(_, time) => *time <= current_tick,
             // https://webaudio.github.io/web-audio-api/#dom-audioparam-linearramptovalueattime
             AutomationEvent::RampToValueAtTime(..) => {
                 // Ramp always has a done time.
@@ -649,7 +695,7 @@ impl AutomationEvent {
 
         match *self {
             AutomationEvent::SetValueAtTime(val, time) => {
-                if current_tick == time {
+                if current_tick >= time {
                     *value = val;
                     *value_time = time;
                     true
@@ -711,5 +757,97 @@ impl AutomationEvent {
                 unreachable!("CancelScheduledValues/SetValue should never appear in the timeline")
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(frame: u64) -> BlockInfo {
+        BlockInfo {
+            sample_rate: 48000.,
+            frame: Tick(frame),
+            time: frame as f64 / 48000.,
+            media_time: None,
+        }
+    }
+
+    /// The param's value on each tick of `range` (one block per 128 ticks).
+    fn run(param: &mut Param, range: std::ops::Range<u64>) -> Vec<f32> {
+        range
+            .map(|t| {
+                let block = t - t % 128;
+                param.update(&info(block), Tick(t - block));
+                param.value()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_value_set_at_a_tick_is_in_force_from_that_tick() {
+        let mut p = Param::new(0.);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(300)));
+        let v = run(&mut p, 0..400);
+        assert_eq!(v[299], 0.);
+        assert_eq!(v[300], 1.);
+    }
+
+    #[test]
+    fn a_value_set_in_the_past_applies_on_the_next_tick() {
+        let mut p = Param::new(0.);
+        run(&mut p, 0..256);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(100)));
+        assert_eq!(run(&mut p, 256..257), vec![1.]);
+        // ...once: the value setter changes it after.
+        p.insert_event(AutomationEvent::SetValue(0.5));
+        assert_eq!(run(&mut p, 257..258), vec![0.5]);
+    }
+
+    #[test]
+    fn a_value_due_on_ticks_the_param_did_not_run_for_applies_when_it_runs() {
+        let mut p = Param::new(0.);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(300)));
+        p.insert_event(AutomationEvent::SetValueAtTime(0., Tick(600)));
+        run(&mut p, 0..128);
+        assert_eq!(run(&mut p, 384..385), vec![1.]);
+        assert_eq!(run(&mut p, 1024..1025), vec![0.]);
+    }
+
+    #[test]
+    fn cancelling_at_an_events_time_removes_it() {
+        let mut p = Param::new(0.);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(300)));
+        p.insert_event(AutomationEvent::CancelScheduledValues(Tick(300)));
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(301)));
+        let v = run(&mut p, 0..400);
+        assert_eq!(v[300], 0.);
+        assert_eq!(v[301], 1.);
+    }
+
+    #[test]
+    fn a_ramp_after_a_set_runs_from_the_sets_tick() {
+        let mut p = Param::new(0.);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(800)));
+        p.insert_event(AutomationEvent::RampToValueAtTime(RampKind::Linear, 0.5, Tick(1600), None));
+        p.insert_event(AutomationEvent::RampToValueAtTime(RampKind::Linear, 0., Tick(2400), None));
+        let v = run(&mut p, 0..3000);
+        assert_eq!(v[799], 0.);
+        assert_eq!(v[800], 1.);
+        assert_eq!(v[1200], 0.75);
+        assert_eq!(v[1600], 0.5);
+        assert_eq!(v[2400], 0.);
+        assert_eq!(v[2999], 0.);
+    }
+
+    #[test]
+    fn an_event_before_a_current_one_not_started_yet_is_the_current_one() {
+        let mut p = Param::new(0.);
+        run(&mut p, 0..128);
+        p.insert_event(AutomationEvent::SetValueAtTime(1., Tick(1000)));
+        p.insert_event(AutomationEvent::SetValueAtTime(0.5, Tick(500)));
+        let v = run(&mut p, 128..1200);
+        assert_eq!(v[500 - 128], 0.5);
+        assert_eq!(v[1000 - 128], 1.);
     }
 }

@@ -257,10 +257,18 @@ impl MediaOutput for MediaSink {
             let last_element = stream.elements.last();
             let last_element = last_element.as_ref().unwrap();
             let sink = match stream.type_ {
-                MediaStreamType::Audio => "autoaudiosink",
-                MediaStreamType::Video => "autovideosink",
+                // With the system's output forbidden, a stream's audio is
+                // discarded on the clock.
+                MediaStreamType::Audio if !crate::system_audio_output() => {
+                    crate::discarding_audio_sink().unwrap()
+                },
+                MediaStreamType::Audio => gstreamer::ElementFactory::make("autoaudiosink")
+                    .build()
+                    .unwrap(),
+                MediaStreamType::Video => gstreamer::ElementFactory::make("autovideosink")
+                    .build()
+                    .unwrap(),
             };
-            let sink = gstreamer::ElementFactory::make(sink).build().unwrap();
             pipeline.add(&sink).unwrap();
             gstreamer::Element::link_many(&[last_element, &sink][..]).unwrap();
 

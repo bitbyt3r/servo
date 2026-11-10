@@ -53,6 +53,35 @@ static BACKEND_BASE_TIME: LazyLock<gstreamer::ClockTime> =
 
 static BACKEND_THREAD: OnceLock<bool> = OnceLock::new();
 
+/// Whether media may play on the system's audio output (true, the default).
+/// A host that routes all page audio itself sets it false before the
+/// backend starts: then an element whose audio the page did not route
+/// through WebAudio, and a media stream played to an output, discard their
+/// audio in a `fakesink` that keeps the clock, and the backend opens no
+/// connection to the sound server.
+static SYSTEM_AUDIO_OUTPUT: AtomicBool = AtomicBool::new(true);
+
+/// Allow or forbid the system's audio output (see `SYSTEM_AUDIO_OUTPUT`).
+/// Call it before the backend is initialised.
+pub fn set_system_audio_output(allowed: bool) {
+    SYSTEM_AUDIO_OUTPUT.store(allowed, Ordering::Relaxed);
+}
+
+/// Whether media may play on the system's audio output.
+pub fn system_audio_output() -> bool {
+    SYSTEM_AUDIO_OUTPUT.load(Ordering::Relaxed)
+}
+
+/// The sink for audio that has nowhere to go when the system's output is
+/// forbidden: it discards every buffer, synced to the clock like a real
+/// audio sink, so the pipeline plays at speed. It provides no clock.
+pub(crate) fn discarding_audio_sink() -> Result<gstreamer::Element, glib::BoolError> {
+    gstreamer::ElementFactory::make("fakesink")
+        .property("sync", true)
+        .property("enable-last-sample", false)
+        .build()
+}
+
 pub type WeakMediaInstance = Weak<Mutex<dyn MediaInstance>>;
 pub type WeakMediaInstanceHashMap = HashMap<ClientContextId, Vec<(usize, WeakMediaInstance)>>;
 
@@ -109,15 +138,19 @@ impl GStreamerBackend {
         // https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/12194
         // . This will hold a connection to the server but it won't create
         // streams. This happens during READY -> PAUSED.
+        // Not when the host forbids the system's output: nothing will use
+        // pulsesink then.
         #[cfg(target_os = "linux")]
         {
             static PULSESINK_KEEPALIVE: std::sync::OnceLock<Option<gstreamer::Element>> =
                 std::sync::OnceLock::new();
-            PULSESINK_KEEPALIVE.get_or_init(|| {
-                let sink = gstreamer::ElementFactory::make("pulsesink").build().ok()?;
-                sink.set_state(gstreamer::State::Ready).ok()?;
-                Some(sink)
-            });
+            if system_audio_output() {
+                PULSESINK_KEEPALIVE.get_or_init(|| {
+                    let sink = gstreamer::ElementFactory::make("pulsesink").build().ok()?;
+                    sink.set_state(gstreamer::State::Ready).ok()?;
+                    Some(sink)
+                });
+            }
         }
 
         let mut errors = vec![];

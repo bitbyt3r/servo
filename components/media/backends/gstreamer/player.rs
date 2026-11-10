@@ -844,6 +844,16 @@ impl GStreamerPlayer {
                     })
                     .build(),
             );
+        } else if !crate::system_audio_output() {
+            // No renderer: the page did not route this element's audio, and
+            // the host forbids the system's output. playbin would pick
+            // one (autoaudiosink: PulseAudio, then ALSA), so give it a sink
+            // that discards the audio on the clock instead.
+            let audio_sink = crate::discarding_audio_sink().map_err(|error| {
+                PlayerError::Backend(format!("fakesink creation failed: {error:?}"))
+            })?;
+            keep_presentation_offset(&audio_sink, &alignment);
+            pipeline.set_property("audio-sink", &audio_sink);
         }
 
         let video_sink = self.render.lock().unwrap().setup_video_sink(&pipeline)?;
