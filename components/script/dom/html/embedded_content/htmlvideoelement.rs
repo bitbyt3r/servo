@@ -160,9 +160,19 @@ impl HTMLVideoElement {
                         alpha_mode,
                         frame.get_data().to_vec(),
                     ))
+                } else if let Some(pixels) = frame.read_pixels() {
+                    // A frame kept on the GPU, read back for this snapshot
+                    // only.  Video is opaque: the alpha byte means nothing.
+                    Some(Snapshot::from_vec(
+                        size.cast(),
+                        SnapshotPixelFormat::BGRA,
+                        SnapshotAlphaMode::AsOpaque {
+                            premultiplied: true,
+                        },
+                        pixels,
+                    ))
                 } else {
-                    // XXX(victor): here we only have the GL texture ID (or,
-                    // for an embedder-supplied frame, its external image id).
+                    // XXX(victor): here we only have the GL texture ID.
                     Some(Snapshot::cleared(size.cast()))
                 }
             },

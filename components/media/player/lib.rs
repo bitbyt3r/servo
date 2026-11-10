@@ -131,4 +131,10 @@ pub trait Player: Send + MediaInstance {
     fn render_use_gl(&self) -> bool;
     fn set_audio_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
     fn set_video_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
+    /// The playback position in seconds, read from the pipeline now rather
+    /// than from the last position event (those come twice a second).
+    /// `None` when the backend cannot tell.
+    fn position(&self) -> Option<f64> {
+        None
+    }
 }

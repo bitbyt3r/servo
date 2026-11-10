@@ -1598,6 +1598,7 @@ impl HTMLMediaElement {
 
         *current_fetch_context = Some(HTMLMediaElementFetchContext::new(
             request.id,
+            offset.unwrap_or(0),
             global.core_resource_thread(),
         ));
         let listener =
@@ -2851,23 +2852,30 @@ impl HTMLMediaElement {
         }
     }
 
-    fn playback_need_data(&self) {
+    fn playback_need_data(&self, cx: &JSContext) {
         // The media engine signals that the source needs more data. If we already have a valid
         // fetch request, we do nothing. Otherwise, if we have no request and the previous request
-        // was cancelled because we got an EnoughData event, we restart fetching where we left.
-        if let Some(ref current_fetch_context) = *self.current_fetch_context.borrow() &&
-            let Some(reason) = current_fetch_context.cancel_reason()
-        {
-            // XXX(ferjm) Ideally we should just create a fetch request from
-            // where we left. But keeping track of the exact next byte that the
-            // media backend expects is not the easiest task, so I'm simply
-            // seeking to the current playback position for now which will create
-            // a new fetch request for the last rendered frame.
-            if *reason == CancelReason::Backoff {
-                self.seek(
-                    self.current_playback_position.get(),
-                    /* approximate_for_speed */ false,
-                );
+        // was cancelled because we got an EnoughData event, we restart fetching where we left:
+        // at the byte after the last one the player took. (Seeking to the current position
+        // instead does nothing before the metadata is in, so a resource that fills the
+        // player's queue before it has metadata never loaded.)
+        let resume = match *self.current_fetch_context.borrow() {
+            Some(ref current_fetch_context) => match current_fetch_context.cancel_reason() {
+                Some(CancelReason::Backoff) => Some(Some(current_fetch_context.resume_offset())),
+                Some(_) => Some(None),
+                None => None,
+            },
+            None => None,
+        };
+        if let Some(resume) = resume {
+            if let Some(offset) = resume {
+                self.fetch_request(cx, Some(offset), None);
+                // The player has asked for data already (this NeedData), so
+                // the new fetch's data goes straight in. A new data source
+                // otherwise waits for the next NeedData, which never comes.
+                if let Some(ref current_fetch_context) = *self.current_fetch_context.borrow() {
+                    current_fetch_context.data_source().borrow().set_locked(false);
+                }
             }
             return;
         }
@@ -2997,6 +3005,22 @@ impl HTMLMediaElement {
             }
         }
         seekable
+    }
+
+    /// While the element plays, its position read from the player now. The
+    /// player's position events come only twice a second, so the official
+    /// position alone is up to half a second old.
+    fn position_now(&self) -> Option<f64> {
+        if self.paused.get() || self.ready_state.get() < ReadyState::HaveFutureData {
+            return None;
+        }
+        let position = self.player.borrow().as_ref()?.lock().unwrap().position()?;
+        let duration = self.duration.get();
+        Some(if duration.is_finite() {
+            position.clamp(0., duration)
+        } else {
+            position.max(0.)
+        })
     }
 
     /// <https://html.spec.whatwg.org/multipage/#earliest-possible-position>
@@ -3563,6 +3587,8 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
             // ranges.
             // <https://github.com/whatwg/html/issues/11773>
             self.current_seek_position.get()
+        } else if let Some(position) = self.position_now() {
+            position
         } else {
             self.official_playback_position.get()
         })
@@ -3901,6 +3927,9 @@ struct BufferedDataSource {
     locked: Cell<bool>,
     /// Temporary storage for incoming data.
     buffers: VecDeque<DataBuffer>,
+    /// Bytes the player has taken, so a fetch cancelled to back off can
+    /// start again from the next byte.
+    pushed: u64,
 }
 
 impl BufferedDataSource {
@@ -3908,6 +3937,7 @@ impl BufferedDataSource {
         BufferedDataSource {
             locked: Cell::new(true),
             buffers: VecDeque::default(),
+            pushed: 0,
         }
     }
 
@@ -3937,14 +3967,23 @@ impl BufferedDataSource {
         while let Some(buffer) = self.buffers.pop_front() {
             match buffer {
                 DataBuffer::Payload(payload) => {
+                    let len = payload.len() as u64;
+                    // A refused buffer stays first in the queue: the next
+                    // push, or a fetch from the next byte, carries on from it.
+                    let refused = payload.clone();
                     if let Err(error) = player.lock().unwrap().push_data(payload) {
-                        warn!("Could not push input data to player: {error:?}");
+                        if error != PlayerError::EnoughData {
+                            warn!("Could not push input data to player: {error:?}");
+                        }
+                        self.buffers.push_front(DataBuffer::Payload(refused));
                         return Err(error);
                     }
+                    self.pushed += len;
                 },
                 DataBuffer::EndOfStream => {
                     if let Err(error) = player.lock().unwrap().end_of_stream() {
                         warn!("Could not signal EOS to player: {error:?}");
+                        self.buffers.push_front(DataBuffer::EndOfStream);
                         return Err(error);
                     }
                 },
@@ -3979,6 +4018,8 @@ pub(crate) struct HTMLMediaElementFetchContext {
     cancel_reason: Option<CancelReason>,
     /// Indicates whether the fetched stream is seekable.
     is_seekable: bool,
+    /// The byte this fetch starts at.
+    offset: u64,
     /// Indicates whether the fetched stream is origin clean.
     origin_clean: bool,
     /// The buffered data source which to be processed by media backend.
@@ -3991,12 +4032,14 @@ pub(crate) struct HTMLMediaElementFetchContext {
 impl HTMLMediaElementFetchContext {
     fn new(
         request_id: RequestId,
+        offset: u64,
         core_resource_thread: CoreResourceThread,
     ) -> HTMLMediaElementFetchContext {
         HTMLMediaElementFetchContext {
             request_id,
             cancel_reason: None,
             is_seekable: false,
+            offset,
             origin_clean: true,
             data_source: RefCell::new(BufferedDataSource::new()),
             fetch_controller: FetchController::new(request_id, false, core_resource_thread),
@@ -4025,6 +4068,11 @@ impl HTMLMediaElementFetchContext {
 
     fn data_source(&self) -> &RefCell<BufferedDataSource> {
         &self.data_source
+    }
+
+    /// The byte to fetch from to carry on after a backoff.
+    fn resume_offset(&self) -> u64 {
+        self.offset + self.data_source.borrow().pushed
     }
 
     fn cancel(&mut self, reason: CancelReason) {
@@ -4415,7 +4463,7 @@ impl HTMLMediaElementEventHandler {
             PlayerEvent::MetadataUpdated(ref metadata) => {
                 element.playback_metadata_updated(cx, metadata)
             },
-            PlayerEvent::NeedData => element.playback_need_data(),
+            PlayerEvent::NeedData => element.playback_need_data(cx),
             PlayerEvent::PositionChanged(position) => {
                 element.playback_position_changed(cx, position)
             },

@@ -20,6 +20,14 @@ pub enum VideoFrameData {
 
 pub trait Buffer: Send + Sync {
     fn to_vec(&self) -> Option<VideoFrameData>;
+
+    /// The frame's pixels in memory, read back on demand, for a frame whose
+    /// data is not raw (a frame kept on the GPU that a page draws into a
+    /// canvas): BGRA, top row first, `width * 4` bytes a row.  `None` if
+    /// the buffer cannot do that.
+    fn read_pixels(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 #[derive(Clone, MallocSizeOf)]
@@ -91,6 +99,12 @@ impl VideoFrame {
     /// Whether the pixels are in memory (`get_data`).
     pub fn is_raw(&self) -> bool {
         matches!(self.data, VideoFrameData::Raw(_))
+    }
+
+    /// The pixels of a frame that is not raw, read back on demand (see
+    /// [`Buffer::read_pixels`]).
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        self._buffer.read_pixels()
     }
 
     /// The WebRender external image id of an embedder-supplied frame.

@@ -4,7 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Once};
 use std::time;
@@ -42,6 +42,34 @@ const DEFAULT_VOLUME: f64 = 1.0;
 const DEFAULT_TIME_RANGES: Vec<Range<f64>> = vec![];
 
 const MAX_BUFFER_SIZE: i32 = 500 * 1024 * 1024;
+
+/// How long before its time a sample reaches the renderers, in ns.
+static PRESENTATION_LEAD: AtomicU64 = AtomicU64::new(0);
+
+/// Hand every sample to the renderers `lead_ns` before its time (base time
+/// plus running time), so a host that presents samples on a clock has them
+/// that early.  The sinks sync to the clock with this offset; the times the
+/// samples carry (`present_at`) and the element's position are unchanged.
+pub fn set_presentation_lead(lead_ns: u64) {
+    PRESENTATION_LEAD.store(lead_ns, Ordering::Relaxed);
+}
+
+fn presentation_offset() -> i64 {
+    -(PRESENTATION_LEAD.load(Ordering::Relaxed).min(i64::MAX as u64) as i64)
+}
+
+/// Sets a sink's `ts-offset` to the presentation lead and keeps it there:
+/// playsink sets both sinks' offsets (from its `av-offset`, 0) once it has
+/// an audio and a video chain.
+fn keep_presentation_offset(sink: &gstreamer::Element) {
+    sink.set_property("ts-offset", presentation_offset());
+    sink.connect_notify(Some("ts-offset"), |sink, _| {
+        let want = presentation_offset();
+        if sink.property::<i64>("ts-offset") != want {
+            sink.set_property("ts-offset", want);
+        }
+    });
+}
 
 fn metadata_from_media_info(media_info: &gstreamer_play::PlayMediaInfo) -> Result<Metadata, ()> {
     let dur = media_info.duration();
@@ -139,6 +167,10 @@ struct PlayerInner {
     last_metadata: Option<Metadata>,
     cat: gstreamer::DebugCategory,
     enough_data: Arc<AtomicBool>,
+    /// Where the media timeline starts: the first frame is at time 0.
+    origin: Arc<Mutex<Origin>>,
+    /// Set at the end of the stream, cleared by a seek or a play.
+    eos: Arc<AtomicBool>,
 }
 
 impl PlayerInner {
@@ -210,6 +242,7 @@ impl PlayerInner {
 
         self.paused.set(false);
         self.can_resume.set(false);
+        self.eos.store(false, Ordering::Relaxed);
         self.player.play();
         Ok(())
     }
@@ -230,7 +263,14 @@ impl PlayerInner {
 
         self.paused.set(true);
         self.can_resume.set(true);
-        self.player.pause();
+        // GstPlay seeks back to the start when paused after the end of the
+        // stream, so the element would show its first frame. The element
+        // pauses itself at the end and must keep showing its last frame.
+        // The pipeline stays at the end; a later play starts from the
+        // beginning, as GstPlay does after the end anyway.
+        if !self.eos.load(Ordering::Relaxed) {
+            self.player.pause();
+        }
         Ok(())
     }
 
@@ -240,6 +280,11 @@ impl PlayerInner {
 
     pub fn can_resume(&self) -> bool {
         self.can_resume.get()
+    }
+
+    pub fn position(&self) -> Option<f64> {
+        let position = self.player.position()?;
+        Some(self.origin.lock().unwrap().media_time(position))
     }
 
     pub fn end_of_stream(&mut self) -> Result<(), PlayerError> {
@@ -271,8 +316,14 @@ impl PlayerInner {
         }
 
         let time = time * 1_000_000_000.;
+        let origin = self.origin.lock().unwrap().time();
+        // A pause at the end left the pipeline playing: pause it now, so the
+        // seek leaves the element paused.
+        if self.eos.swap(false, Ordering::Relaxed) && self.paused.get() {
+            self.player.pause();
+        }
         self.player
-            .seek(gstreamer::ClockTime::from_nseconds(time as u64));
+            .seek(gstreamer::ClockTime::from_nseconds(time as u64) + origin);
         Ok(())
     }
 
@@ -344,18 +395,34 @@ impl PlayerInner {
 
     pub fn seekable(&self) -> Vec<Range<f64>> {
         // if the servosrc is seekable, we should return the duration of the media
+        // (all of it, when the duration is not known yet: a resource still
+        // growing, or one whose duration comes just after its metadata)
+        // GstPlay asks whether the media is seekable once, early; a demuxer
+        // in push mode (Matroska) only says so once it has read further, so
+        // ask the pipeline again while it said no.
         if let Some(metadata) = self.last_metadata.as_ref() &&
-            metadata.is_seekable &&
-            let Some(duration) = metadata.duration
+            (metadata.is_seekable || self.pipeline_seekable())
         {
             return vec![Range {
                 start: 0.0,
-                end: duration.as_secs_f64(),
+                end: metadata
+                    .duration
+                    .map_or(f64::INFINITY, |duration| duration.as_secs_f64()),
             }];
         }
 
         // if the servosrc is not seekable, we should return the buffered range
         self.buffered()
+    }
+
+    fn pipeline_seekable(&self) -> bool {
+        if self.stream_type != StreamType::Seekable {
+            return false;
+        }
+        let mut query = gstreamer::query::Seeking::new(gstreamer::Format::Time);
+        let seekable = self.player.pipeline().query(&mut query) && query.result().0;
+        gstreamer::debug!(self.cat, obj = &self.player, "Seekable now: {seekable}");
+        seekable
     }
 
     fn set_stream(&mut self, stream: &MediaStreamId, only_stream: bool) -> Result<(), PlayerError> {
@@ -541,12 +608,19 @@ impl GStreamerPlayer {
             pipeline.set_property_from_value("flags", &flags);
         }
 
+        let origin = Arc::new(Mutex::new(Origin::default()));
+        let eos = Arc::new(AtomicBool::new(false));
+
         // Set max size for the player buffer.
         pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
 
         // Set player position interval update to 0.5 seconds.
         let mut config = player.config();
         config.set_position_update_interval(500u32);
+        // A seek lands on the frame asked for. Without this an MPEG-TS
+        // demuxer starts from a point 2.5 s earlier and calls that the
+        // position, and other demuxers snap to a keyframe.
+        config.set_seek_accurate(true);
         player
             .set_config(config)
             .map_err(|e| PlayerError::Backend(e.to_string()))?;
@@ -559,6 +633,7 @@ impl GStreamerPlayer {
                         PlayerError::Backend(format!("appsink creation failed: {error:?}"))
                     })?;
 
+            keep_presentation_offset(&audio_sink);
             pipeline.set_property("audio-sink", &audio_sink);
 
             let audio_sink = audio_sink.dynamic_cast::<gstreamer_app::AppSink>().unwrap();
@@ -572,6 +647,7 @@ impl GStreamerPlayer {
             ));
 
             let weak_audio_renderer = Arc::downgrade(audio_renderer);
+            let audio_origin = origin.clone();
 
             audio_sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
@@ -580,6 +656,7 @@ impl GStreamerPlayer {
                         let sample = audio_sink
                             .pull_sample()
                             .map_err(|_| gstreamer::FlowError::Eos)?;
+                        audio_origin.lock().unwrap().note(&sample, false);
                         let buffer = sample.buffer_owned().ok_or(gstreamer::FlowError::Error)?;
                         let audio_info = sample
                             .caps()
@@ -621,6 +698,7 @@ impl GStreamerPlayer {
         }
 
         let video_sink = self.render.lock().unwrap().setup_video_sink(&pipeline)?;
+        keep_presentation_offset(video_sink.upcast_ref());
 
         // There's a known bug in gstreamer that may cause a wrong transition
         // to the ready state while setting the uri property:
@@ -669,6 +747,8 @@ impl GStreamerPlayer {
             last_metadata: None,
             cat: gstreamer::DebugCategory::get("servoplayer").unwrap(),
             enough_data: Arc::new(AtomicBool::new(false)),
+            origin: origin.clone(),
+            eos: eos.clone(),
         })));
 
         let inner = self.inner.borrow();
@@ -676,6 +756,7 @@ impl GStreamerPlayer {
         let observer = self.observer.clone();
         // Handle `end-of-stream` signal.
         signal_adapter.connect_end_of_stream(move |_| {
+            eos.store(true, Ordering::Relaxed);
             let _ = notify!(observer, PlayerEvent::EndOfStream);
         });
 
@@ -704,17 +785,21 @@ impl GStreamerPlayer {
         });
 
         let observer = self.observer.clone();
+        let position_origin = origin.clone();
         // Handle `position-update` signal.
         signal_adapter.connect_position_updated(move |_, position| {
-            if let Some(seconds) = position.map(|p| p.seconds_f64()) {
+            if let Some(position) = position {
+                let seconds = position_origin.lock().unwrap().media_time(position);
                 let _ = notify!(observer, PlayerEvent::PositionChanged(seconds));
             }
         });
 
         let observer = self.observer.clone();
+        let seek_origin = origin.clone();
         // Handle `seek-done` signal.
         signal_adapter.connect_seek_done(move |_, position| {
-            let _ = notify!(observer, PlayerEvent::SeekDone(position.seconds_f64()));
+            let seconds = seek_origin.lock().unwrap().media_time(position);
+            let _ = notify!(observer, PlayerEvent::SeekDone(seconds));
         });
 
         // Handle `media-info-updated` signal.
@@ -794,8 +879,10 @@ impl GStreamerPlayer {
                 let render = self.render.clone();
                 let observer = self.observer.clone();
                 let weak_video_renderer = Arc::downgrade(&video_renderer);
+                let video_origin = origin.clone();
 
                 move |sample: gstreamer::Sample, present_at: Option<u64>| {
+                    video_origin.lock().unwrap().note(&sample, true);
                     let Some(frame) = render.lock().unwrap().get_frame_from_sample(sample) else {
                         return Err(gstreamer::FlowError::Error);
                     };
@@ -1013,6 +1100,7 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(pause, ());
     inner_player_proxy_getter!(paused, bool, DEFAULT_PAUSED);
     inner_player_proxy_getter!(can_resume, bool, DEFAULT_CAN_RESUME);
+    inner_player_proxy_getter!(position, Option<f64>, None);
     inner_player_proxy!(stop, ());
     inner_player_proxy!(end_of_stream, ());
     inner_player_proxy!(set_input_size, size, u64);
@@ -1101,5 +1189,51 @@ fn running_time(
     {
         Some(segment) => segment.to_running_time(pts),
         None => Some(pts),
+    }
+}
+
+/// Where a player's media timeline starts.  GStreamer reports positions in
+/// stream time, which for many files does not start at 0: an MPEG-TS
+/// demuxer counts from the first PCR, so the first frame of a file can be at
+/// 0.125 s or 1.4 s.  The element's timeline starts at its first frame, as
+/// other browsers have it: positions are reported less this origin and
+/// seeks are made plus it.
+#[derive(Default)]
+struct Origin {
+    time: Option<gstreamer::ClockTime>,
+    from_video: bool,
+}
+
+impl Origin {
+    /// A sample is about to be shown or heard: the first one sets the
+    /// origin.  The first video frame wins over the first audio block (a
+    /// video element's frames are what must land on their times).
+    fn note(&mut self, sample: &gstreamer::Sample, video: bool) {
+        if self.from_video || (self.time.is_some() && !video) {
+            return;
+        }
+        let Some(pts) = sample.buffer().and_then(|buffer| buffer.pts()) else {
+            return;
+        };
+        let stream_time = match sample
+            .segment()
+            .and_then(|segment| segment.downcast_ref::<gstreamer::ClockTime>())
+        {
+            Some(segment) => segment.to_stream_time(pts),
+            None => Some(pts),
+        };
+        if let Some(stream_time) = stream_time {
+            self.time = Some(stream_time);
+            self.from_video = video;
+        }
+    }
+
+    fn time(&self) -> gstreamer::ClockTime {
+        self.time.unwrap_or(gstreamer::ClockTime::ZERO)
+    }
+
+    /// A stream time as a position on the element's timeline, in seconds.
+    fn media_time(&self, position: gstreamer::ClockTime) -> f64 {
+        position.saturating_sub(self.time()).seconds_f64()
     }
 }
