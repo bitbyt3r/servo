@@ -3,11 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time;
+use std::time::{Duration, Instant};
 
 use byte_slice_cast::AsSliceOf;
 use glib;
@@ -58,13 +60,155 @@ fn presentation_offset() -> i64 {
     -(PRESENTATION_LEAD.load(Ordering::Relaxed).min(i64::MAX as u64) as i64)
 }
 
-/// Sets a sink's `ts-offset` to the presentation lead and keeps it there:
-/// playsink sets both sinks' offsets (from its `av-offset`, 0) once it has
-/// an audio and a video chain.
-fn keep_presentation_offset(sink: &gstreamer::Element) {
-    sink.set_property("ts-offset", presentation_offset());
-    sink.connect_notify(Some("ts-offset"), |sink, _| {
-        let want = presentation_offset();
+/// The host's cycle grid: the start of a recent cycle and the cycle length,
+/// in CLOCK_MONOTONIC ns. Zero until the host sets it.
+static GRID_START: AtomicU64 = AtomicU64::new(0);
+static GRID_PERIOD: AtomicU64 = AtomicU64::new(0);
+
+/// The host presents samples on a grid of cycles: one starts at `cycle_ns`
+/// and the next ones follow every `period_ns`. Call it every cycle. Each
+/// run of a player's samples is then placed on the grid: a video frame's
+/// time falls [`presentation_phase`] before the start of the cycle that
+/// shows it, whatever the moment playback started.
+pub fn set_presentation_grid(cycle_ns: u64, period_ns: u64) {
+    GRID_START.store(cycle_ns, Ordering::Relaxed);
+    GRID_PERIOD.store(period_ns, Ordering::Relaxed);
+}
+
+/// How long before the start of the cycle that shows it an aligned video
+/// frame's time falls: half a cycle, as far from either edge as it can be,
+/// so jitter in the cycle times cannot move a frame to the next cycle. A
+/// host that plays each audio sample this long after its time hears the
+/// audio of a frame in the cycle that shows the frame.
+pub fn presentation_phase(period_ns: u64) -> u64 {
+    period_ns / 2
+}
+
+/// A sample this far from the grid is not about to be presented (a frame
+/// prerolled on an old base time): it is left alone and starts no run.
+const NEAR_GRID_NS: u64 = 1_000_000_000;
+
+/// How long the audio of a new run waits for the video to place the run.
+const AUDIO_WAITS_FOR_VIDEO: Duration = Duration::from_millis(20);
+
+/// The shift that puts a sample due at `at` on the grid: the cycle it would
+/// show on unshifted (the first that starts at or after `at`) stays, and
+/// its time moves to the phase before that cycle. Between minus the phase
+/// and a period less the phase, so nothing shows later than unshifted.
+fn grid_shift(at: u64) -> Option<i64> {
+    let start = GRID_START.load(Ordering::Relaxed);
+    let period = GRID_PERIOD.load(Ordering::Relaxed);
+    if start == 0 || period == 0 || at.abs_diff(start) > NEAR_GRID_NS {
+        return None;
+    }
+    let (start, period) = (start as i64, period as i64);
+    let since = at as i64 - start;
+    let cycles = since.div_euclid(period) + i64::from(since.rem_euclid(period) != 0);
+    let cycle = start + cycles * period;
+    Some(cycle - presentation_phase(period as u64) as i64 - at as i64)
+}
+
+/// Puts a player's samples on the host's cycle grid. A run of samples
+/// starts whenever the pipeline gets a new base time: a play, a seek while
+/// playing, a loop back to the start. The run's first video frame sets its
+/// shift (see [`grid_shift`]) and every sample of the run moves by it, so
+/// the audio keeps its place against the frames. The audio of a run waits
+/// for that frame, briefly, rather than set a shift of its own; it sets one
+/// only when the player has no video.
+#[derive(Default)]
+struct Alignment {
+    state: Mutex<AlignmentState>,
+    placed: Condvar,
+    /// The shift of the newest run, for the sinks' `ts-offset`.
+    shift: AtomicI64,
+    sinks: Mutex<Vec<glib::WeakRef<gstreamer::Element>>>,
+}
+
+#[derive(Default)]
+struct AlignmentState {
+    /// (base time, shift) of the latest runs, newest last.
+    runs: VecDeque<(u64, i64)>,
+    /// A video frame went through this player.
+    video: bool,
+}
+
+impl Alignment {
+    /// When a sample due at `at` (base time plus running time) is to be
+    /// presented. A run starting with this sample is placed by `natural`:
+    /// when a frame clipped at the start of a segment would have started.
+    fn place(&self, base: u64, at: u64, natural: u64, video: bool) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        state.video |= video;
+        let found = |state: &AlignmentState| {
+            state.runs.iter().rev().find(|(b, _)| *b == base).map(|r| r.1)
+        };
+        if !video && state.video && found(&state).is_none() {
+            let deadline = Instant::now() + AUDIO_WAITS_FOR_VIDEO;
+            while found(&state).is_none() {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                state = self.placed.wait_timeout(state, deadline - now).unwrap().0;
+            }
+        }
+        let shift = match found(&state) {
+            Some(shift) => shift,
+            None => {
+                let Some(shift) = grid_shift(natural) else {
+                    return at;
+                };
+                let period = GRID_PERIOD.load(Ordering::Relaxed);
+                let phase = presentation_phase(period) as i64;
+                log::info!(
+                    "media: playback placed on the cycle grid: its first {} was due {:.2} ms \
+                     before the cycle that shows it, now {:.2} ms",
+                    if video { "frame" } else { "audio sample" },
+                    (phase + shift) as f64 / 1e6,
+                    phase as f64 / 1e6,
+                );
+                state.runs.push_back((base, shift));
+                if state.runs.len() > 4 {
+                    state.runs.pop_front();
+                }
+                drop(state);
+                self.placed.notify_all();
+                self.set_offsets(shift);
+                shift
+            },
+        };
+        at.saturating_add_signed(shift)
+    }
+
+    fn offset(&self) -> i64 {
+        presentation_offset() + self.shift.load(Ordering::Relaxed)
+    }
+
+    /// The sinks hand samples over the presentation lead before their
+    /// shifted time.
+    fn set_offsets(&self, shift: i64) {
+        self.shift.store(shift, Ordering::Relaxed);
+        let want = self.offset();
+        for sink in self.sinks.lock().unwrap().iter().filter_map(|s| s.upgrade()) {
+            if sink.property::<i64>("ts-offset") != want {
+                sink.set_property("ts-offset", want);
+            }
+        }
+    }
+}
+
+/// Sets a sink's `ts-offset` to the presentation lead (less the shift of the
+/// current run) and keeps it there: playsink sets both sinks' offsets (from
+/// its `av-offset`, 0) once it has an audio and a video chain.
+fn keep_presentation_offset(sink: &gstreamer::Element, alignment: &Arc<Alignment>) {
+    alignment.sinks.lock().unwrap().push(sink.downgrade());
+    sink.set_property("ts-offset", alignment.offset());
+    let alignment = Arc::downgrade(alignment);
+    sink.connect_notify(Some("ts-offset"), move |sink, _| {
+        let Some(alignment) = alignment.upgrade() else {
+            return;
+        };
+        let want = alignment.offset();
         if sink.property::<i64>("ts-offset") != want {
             sink.set_property("ts-offset", want);
         }
@@ -610,6 +754,7 @@ impl GStreamerPlayer {
 
         let origin = Arc::new(Mutex::new(Origin::default()));
         let eos = Arc::new(AtomicBool::new(false));
+        let alignment = Arc::new(Alignment::default());
 
         // Set max size for the player buffer.
         pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
@@ -633,7 +778,7 @@ impl GStreamerPlayer {
                         PlayerError::Backend(format!("appsink creation failed: {error:?}"))
                     })?;
 
-            keep_presentation_offset(&audio_sink);
+            keep_presentation_offset(&audio_sink, &alignment);
             pipeline.set_property("audio-sink", &audio_sink);
 
             let audio_sink = audio_sink.dynamic_cast::<gstreamer_app::AppSink>().unwrap();
@@ -648,6 +793,7 @@ impl GStreamerPlayer {
 
             let weak_audio_renderer = Arc::downgrade(audio_renderer);
             let audio_origin = origin.clone();
+            let audio_alignment = alignment.clone();
 
             audio_sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
@@ -671,7 +817,10 @@ impl GStreamerPlayer {
 
                         let present_at = running_time(&sample, buffer.pts())
                             .zip(audio_sink.base_time())
-                            .map(|(running, base)| base.nseconds() + running.nseconds());
+                            .map(|(running, base)| {
+                                let at = base.nseconds() + running.nseconds();
+                                audio_alignment.place(base.nseconds(), at, at, false)
+                            });
                         let map = buffer
                             .into_mapped_buffer_readable()
                             .map_err(|_| gstreamer::FlowError::Error)?;
@@ -698,7 +847,7 @@ impl GStreamerPlayer {
         }
 
         let video_sink = self.render.lock().unwrap().setup_video_sink(&pipeline)?;
-        keep_presentation_offset(video_sink.upcast_ref());
+        keep_presentation_offset(video_sink.upcast_ref(), &alignment);
 
         // There's a known bug in gstreamer that may cause a wrong transition
         // to the ready state while setting the uri property:
@@ -903,11 +1052,16 @@ impl GStreamerPlayer {
             };
 
             // When a sample is meant to be shown: pipeline base time plus its
-            // running time, on the system (monotonic) clock.
-            let present_at = |sink: &gstreamer_app::AppSink, sample: &gstreamer::Sample| {
-                let running = running_time(sample, sample.buffer().and_then(|b| b.pts()))?;
-                let base = sink.base_time()?;
-                Some(base.nseconds() + running.nseconds())
+            // running time, on the system (monotonic) clock, placed on the
+            // host's cycle grid.
+            let present_at = move |sink: &gstreamer_app::AppSink, sample: &gstreamer::Sample| {
+                let buffer = sample.buffer()?;
+                let running = running_time(sample, buffer.pts())?;
+                let base = sink.base_time()?.nseconds();
+                let at = base + running.nseconds();
+                let natural = natural_start(sample, buffer)
+                    .map_or(at, |start| base.saturating_add_signed(start));
+                Some(alignment.place(base, at, natural, true))
             };
 
             // Set video_sink callbacks.
@@ -915,6 +1069,7 @@ impl GStreamerPlayer {
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll({
                         let render_sample = render_sample.clone();
+                        let present_at = present_at.clone();
                         move |video_sink| {
                             let sample = video_sink
                                 .pull_preroll()
@@ -1190,6 +1345,25 @@ fn running_time(
         Some(segment) => segment.to_running_time(pts),
         None => Some(pts),
     }
+}
+
+/// The running time a video frame would start at had it not been clipped:
+/// a seek to a time between two frames' times leaves the first frame
+/// starting at the seek's time, with the time it shows for. Its end, less a
+/// frame's duration at the stream's frame rate, is where the frames of the
+/// stream fall. Negative when that is before the segment.
+fn natural_start(sample: &gstreamer::Sample, buffer: &gstreamer::BufferRef) -> Option<i64> {
+    let end = running_time(sample, Some(buffer.pts()? + buffer.duration()?))?;
+    let rate = sample
+        .caps()?
+        .structure(0)?
+        .get::<gstreamer::Fraction>("framerate")
+        .ok()?;
+    let (num, den) = (i64::from(rate.numer()), i64::from(rate.denom()));
+    if num <= 0 || den <= 0 {
+        return None;
+    }
+    Some(end.nseconds() as i64 - den * 1_000_000_000 / num)
 }
 
 /// Where a player's media timeline starts.  GStreamer reports positions in

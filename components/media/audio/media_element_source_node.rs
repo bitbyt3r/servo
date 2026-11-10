@@ -25,9 +25,18 @@ pub enum MediaElementSourceNodeMessage {
 struct Delivered {
     channels: Vec<Vec<f32>>,
     /// (presentation time in CLOCK_MONOTONIC ns, index into the buffers) of
-    /// the first timestamped delivery; later samples follow contiguously.
+    /// the delivery that started the current timeline; later samples follow
+    /// contiguously.
     anchor: Option<(u64, i64)>,
+    /// The context's sample rate, once a block has been rendered.
+    rate: Option<f32>,
 }
+
+/// A delivery whose time is this far from where the samples before it put
+/// it starts a new timeline: playback resumed, or the media seeked or
+/// looped. Decoders give contiguous timestamps, so anything past rounding
+/// is a new timeline.
+const NEW_TIMELINE_NS: f64 = 1e6;
 
 #[derive(AudioNodeCommon)]
 pub(crate) struct MediaElementSourceNode {
@@ -116,6 +125,7 @@ impl AudioNodeEngine for MediaElementSourceNode {
 
         let shared = self.delivered.clone();
         let mut delivered = shared.lock().unwrap();
+        delivered.rate = Some(info.sample_rate);
         if delivered.channels.is_empty() {
             inputs.blocks.push(Default::default());
             return inputs;
@@ -171,9 +181,23 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
                 *entry.insert(delivered.channels.len())
             },
         };
-        if channel == 1 && delivered.anchor.is_none() {
-            if let Some(present_at) = present_at {
-                let index = delivered.channels[0].len() as i64;
+        // The first delivery anchors the samples in time, and so does each
+        // that does not follow on from the ones before it. Samples delivered
+        // before a new anchor stay just ahead of it: after a pause they are
+        // the ones that come next.
+        if channel == 1 &&
+            let Some(present_at) = present_at
+        {
+            let index = delivered.channels[0].len() as i64;
+            let follows = match (delivered.anchor, delivered.rate) {
+                (Some((time, at)), Some(rate)) => {
+                    let expected = time as f64 + (index - at) as f64 * 1e9 / rate as f64;
+                    (present_at as f64 - expected).abs() <= NEW_TIMELINE_NS
+                },
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if !follows {
                 delivered.anchor = Some((present_at, index));
             }
         }
