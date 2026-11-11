@@ -807,6 +807,17 @@ impl GStreamerPlayer {
                 ));
             };
             pipeline.set_property_from_value("flags", &flags);
+            // The download buffer keeps the media in a file of its own in
+            // the user's cache directory (`<program>-XXXXXX`), and removes
+            // it only when it closes cleanly. A process that is killed left
+            // its files behind. So remove the file's name as soon as the
+            // buffer has made it: the buffer reads and writes it only
+            // through the descriptor it holds (its path is used again only
+            // to remove it), and the kernel frees the file when the
+            // descriptor closes, however the process ends.
+            pipeline.connect_deep_notify(Some("temp-location"), |_, buffer, _| {
+                unlink_download_file(buffer);
+            });
         }
 
         let origin = Arc::new(Mutex::new(Origin::default()));
@@ -872,10 +883,11 @@ impl GStreamerPlayer {
                             return Err(gstreamer::FlowError::Flushing);
                         };
 
+                        let lead = clipped_lead(&sample, &buffer, &audio_info);
                         let present_at = running_time(&sample, buffer.pts())
                             .zip(audio_sink.base_time())
                             .map(|(running, base)| {
-                                let at = base.nseconds() + running.nseconds();
+                                let at = (base.nseconds() + running.nseconds()).saturating_sub(lead);
                                 let duration = buffer.duration().map_or_else(
                                     || {
                                         let frames = buffer.size() as u64 /
@@ -1414,6 +1426,78 @@ impl Drop for GStreamerPlayer {
             });
         let _ = rx_ack.recv();
     }
+}
+
+/// Removes the name of a download buffer's file once the buffer has made
+/// it (see `setup`). The buffer holds the file open; nothing reopens it by
+/// name. The buffer is told not to remove it again when it closes: the name
+/// may by then belong to another buffer's new file.
+fn unlink_download_file(buffer: &gstreamer::Object) {
+    if buffer.find_property("temp-remove").is_none() {
+        return;
+    }
+    let Some(path) = buffer.property::<Option<String>>("temp-location") else {
+        return;
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            buffer.set_property("temp-remove", false);
+            log::info!("media: download buffer file {path} unlinked; it is freed when the media closes");
+        },
+        Err(error) => log::warn!("media: could not unlink download buffer file {path}: {error}"),
+    }
+}
+
+/// How far, in ns, the first sample of an audio buffer sits before the
+/// buffer's time. Not at all, except for the first buffer after a seek: the
+/// decoder clips it at the start of the segment and stamps it with the
+/// segment's start, though it keeps the sample at or before that point (it
+/// counts the samples to cut off rounding down). So its first sample can
+/// sit up to a whole sample before its stamp. Its end is not moved by the
+/// clip, and is on the decoder's own count, as are the buffers after it, so
+/// the first sample's time is the end less the samples it holds.
+fn clipped_lead(
+    sample: &gstreamer::Sample,
+    buffer: &gstreamer::BufferRef,
+    info: &gstreamer_audio::AudioInfo,
+) -> u64 {
+    let (Some(pts), Some(duration)) = (buffer.pts(), buffer.duration()) else {
+        return 0;
+    };
+    let (rate, bpf) = (info.rate() as u64, info.bpf() as u64);
+    if rate == 0 || bpf == 0 {
+        return 0;
+    }
+    let Some(segment) = sample
+        .segment()
+        .and_then(|segment| segment.downcast_ref::<gstreamer::ClockTime>())
+    else {
+        return 0;
+    };
+    // Only a buffer that starts on its segment's start can have been
+    // clipped there; one clipped at the segment's stop too has lost its end.
+    if segment.start() != Some(pts) ||
+        segment.rate() != 1.0 ||
+        segment.stop().is_some_and(|stop| pts + duration >= stop)
+    {
+        return 0;
+    }
+    let frames = buffer.size() as u64 / bpf;
+    let length = ((frames as u128 * 1_000_000_000 + rate as u128 / 2) / rate as u128) as u64;
+    let Some(first) = (pts + duration).nseconds().checked_sub(length) else {
+        return 0;
+    };
+    let lead = pts.nseconds().saturating_sub(first);
+    // Rounding to the ns is not a lead, and a whole sample is the most a
+    // clip can leave.
+    if lead < 2 || lead > 1_000_000_000 / rate + 2 {
+        return 0;
+    }
+    log::info!(
+        "media: the first audio buffer after a seek starts {:.3} samples before its time; placed there",
+        lead as f64 * rate as f64 / 1e9
+    );
+    lead
 }
 
 /// The running time of a timestamp in the sample's segment: what the pipeline
