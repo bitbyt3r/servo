@@ -34,6 +34,9 @@ struct Delivered {
     /// came, until a block reaches it: to say whether a start (a play, a
     /// seek, a loop) came in time to be heard from its first sample.
     started: Option<(i64, std::time::Instant)>,
+    /// The newest timeline's second delivery has not come yet: it places
+    /// the timeline (see `MediaElementSourceNodeRenderer::render`).
+    second: bool,
 }
 
 /// A delivery whose time is this far from where the samples before it put
@@ -41,6 +44,10 @@ struct Delivered {
 /// looped. Decoders give contiguous timestamps, so anything past rounding
 /// is a new timeline.
 const NEW_TIMELINE_NS: f64 = 1e6;
+
+/// A start whose first delivery sits this many samples or more off the one
+/// after it is placed by the later one (see `render`).
+const WHOLE_SAMPLE_OFF: f64 = 0.75;
 
 #[derive(AudioNodeCommon)]
 pub(crate) struct MediaElementSourceNode {
@@ -214,17 +221,52 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
             let Some(present_at) = present_at
         {
             let index = delivered.channels[0].len() as i64;
-            let follows = match (delivered.anchor, delivered.rate) {
+            let off = match (delivered.anchor, delivered.rate) {
                 (Some((time, at)), Some(rate)) => {
                     let expected = time as f64 + (index - at) as f64 * 1e9 / rate as f64;
-                    (present_at as f64 - expected).abs() <= NEW_TIMELINE_NS
+                    Some(Some((present_at as f64 - expected, rate)))
                 },
-                (Some(_), None) => true,
-                (None, _) => false,
+                (Some(_), None) => Some(None),
+                (None, _) => None,
             };
-            if !follows {
-                delivered.anchor = Some((present_at, index));
-                delivered.started = Some((index, std::time::Instant::now()));
+            match off {
+                // A timeline's first delivery after a seek is clipped at the
+                // start of the segment and stamped with the segment's start,
+                // though the decoder kept the sample at or before it (it
+                // counts the samples to cut off rounding down), so its first
+                // sample can sit a whole sample before its stamp. The
+                // deliveries after it carry the decoder's own count from its
+                // packets' times. So when the second delivery puts the
+                // timeline a whole sample off (more than a 90 kHz tick, 0.53
+                // samples at 48 kHz, which any timestamp may be off), it
+                // places the timeline, if nothing of it has played yet.
+                Some(Some((off_ns, rate))) if off_ns.abs() <= NEW_TIMELINE_NS => {
+                    let samples = off_ns * rate as f64 / 1e9;
+                    if std::mem::take(&mut delivered.second) {
+                        let unplayed = delivered.started.is_some();
+                        let moved = unplayed && samples.abs() >= WHOLE_SAMPLE_OFF;
+                        log::info!(
+                            "media: the first delivery of a start sat {:+.3} samples off the one after it{}",
+                            -samples,
+                            if moved {
+                                "; placed by the later"
+                            } else if samples.abs() >= WHOLE_SAMPLE_OFF {
+                                "; it had begun to play, so it stays"
+                            } else {
+                                ""
+                            }
+                        );
+                        if moved {
+                            delivered.anchor = Some((present_at, index));
+                        }
+                    }
+                },
+                Some(None) => {},
+                _ => {
+                    delivered.anchor = Some((present_at, index));
+                    delivered.started = Some((index, std::time::Instant::now()));
+                    delivered.second = true;
+                },
             }
         }
         delivered.channels[channel - 1].extend_from_slice((*sample).as_ref());
