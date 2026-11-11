@@ -115,6 +115,17 @@ fn grid_shift(at: u64) -> Option<i64> {
 /// the audio keeps its place against the frames. The audio of a run waits
 /// for that frame, briefly, rather than set a shift of its own; it sets one
 /// only when the player has no video.
+///
+/// A loop is one run following on from the one before: the seek back to
+/// the start that ends a pass (see [`Alignment::follow_on`]) places the
+/// next pass's first frame on the cycle after the pass ended, its last
+/// frame or its last audio sample, whichever is later (a file whose sound
+/// runs on after its last frame holds that frame until the sound ends), and
+/// its audio right after the pass's last sample. Without that the next
+/// pass was placed from the moment of the seek, which comes the
+/// presentation lead before the end of the pass (the sinks see the end of
+/// the stream that early), and its first frames took the place of the last
+/// frames of the pass.
 #[derive(Default)]
 struct Alignment {
     state: Mutex<AlignmentState>,
@@ -122,6 +133,10 @@ struct Alignment {
     /// The shift of the newest run, for the sinks' `ts-offset`.
     shift: AtomicI64,
     sinks: Mutex<Vec<glib::WeakRef<gstreamer::Element>>>,
+    /// The element is playing (not paused): a frame prerolled now, after a
+    /// seek while playing, comes again as the run's first sample, on the
+    /// run's time, and is not shown early as a preroll.
+    playing: AtomicBool,
 }
 
 #[derive(Default)]
@@ -130,13 +145,25 @@ struct AlignmentState {
     runs: VecDeque<(u64, i64)>,
     /// A video frame went through this player.
     video: bool,
+    /// When the newest run's samples end as presented (CLOCK_MONOTONIC
+    /// ns): the later of the end of its last video frame and of its last
+    /// audio sample, as the stream ends when both have. Zero before any.
+    end: u64,
+    /// The next run follows on from the newest one's end (a loop).
+    follow: bool,
 }
 
 impl Alignment {
-    /// When a sample due at `at` (base time plus running time) is to be
-    /// presented. A run starting with this sample is placed by `natural`:
-    /// when a frame clipped at the start of a segment would have started.
-    fn place(&self, base: u64, at: u64, natural: u64, video: bool) -> u64 {
+    /// The next run follows on from the newest one: the media looped.
+    fn follow_on(&self) {
+        self.state.lock().unwrap().follow = true;
+    }
+
+    /// When a sample due at `at` (base time plus running time) and lasting
+    /// `duration` is to be presented. A run starting with this sample is
+    /// placed by `natural`: when a frame clipped at the start of a segment
+    /// would have started.
+    fn place(&self, base: u64, at: u64, natural: u64, video: bool, duration: u64) -> u64 {
         let mut state = self.state.lock().unwrap();
         state.video |= video;
         let found = |state: &AlignmentState| {
@@ -155,29 +182,49 @@ impl Alignment {
         let shift = match found(&state) {
             Some(shift) => shift,
             None => {
-                let Some(shift) = grid_shift(natural) else {
+                // A loop starts where the pass before it ended, or when it
+                // can, if that has passed.
+                let follows = std::mem::take(&mut state.follow) && state.end > 0;
+                let target = if follows { natural.max(state.end) } else { natural };
+                let Some(grid) = grid_shift(target) else {
                     return at;
                 };
+                let shift = target as i64 - natural as i64 + grid;
                 let period = GRID_PERIOD.load(Ordering::Relaxed);
                 let phase = presentation_phase(period) as i64;
-                log::info!(
-                    "media: playback placed on the cycle grid: its first {} was due {:.2} ms \
-                     before the cycle that shows it, now {:.2} ms",
-                    if video { "frame" } else { "audio sample" },
-                    (phase + shift) as f64 / 1e6,
-                    phase as f64 / 1e6,
-                );
+                if follows {
+                    log::info!(
+                        "media: the loop's next pass follows on: its first {} placed {:.2} ms \
+                         after the seek put it ({:.2} ms after the pass's end)",
+                        if video { "frame" } else { "audio sample" },
+                        shift as f64 / 1e6,
+                        (target as i64 + grid - state.end as i64) as f64 / 1e6,
+                    );
+                } else {
+                    log::info!(
+                        "media: playback placed on the cycle grid: its first {} was due {:.2} ms \
+                         before the cycle that shows it, now {:.2} ms",
+                        if video { "frame" } else { "audio sample" },
+                        (phase + shift) as f64 / 1e6,
+                        phase as f64 / 1e6,
+                    );
+                }
                 state.runs.push_back((base, shift));
                 if state.runs.len() > 4 {
                     state.runs.pop_front();
                 }
+                state.end = at.saturating_add_signed(shift).saturating_add(duration);
                 drop(state);
                 self.placed.notify_all();
                 self.set_offsets(shift);
-                shift
+                return at.saturating_add_signed(shift);
             },
         };
-        at.saturating_add_signed(shift)
+        let placed = at.saturating_add_signed(shift);
+        if state.runs.back().is_some_and(|r| r.0 == base) {
+            state.end = state.end.max(placed.saturating_add(duration));
+        }
+        placed
     }
 
     fn offset(&self) -> i64 {
@@ -315,6 +362,8 @@ struct PlayerInner {
     origin: Arc<Mutex<Origin>>,
     /// Set at the end of the stream, cleared by a seek or a play.
     eos: Arc<AtomicBool>,
+    /// Where the player's samples are presented.
+    alignment: Arc<Alignment>,
 }
 
 impl PlayerInner {
@@ -387,6 +436,7 @@ impl PlayerInner {
         self.paused.set(false);
         self.can_resume.set(false);
         self.eos.store(false, Ordering::Relaxed);
+        self.alignment.playing.store(true, Ordering::Relaxed);
         self.player.play();
         Ok(())
     }
@@ -394,6 +444,7 @@ impl PlayerInner {
     pub fn stop(&mut self) -> Result<(), PlayerError> {
         self.player.stop();
         self.paused.set(true);
+        self.alignment.playing.store(false, Ordering::Relaxed);
         self.can_resume.set(false);
         self.last_metadata = None;
         self.source = None;
@@ -407,6 +458,7 @@ impl PlayerInner {
 
         self.paused.set(true);
         self.can_resume.set(true);
+        self.alignment.playing.store(false, Ordering::Relaxed);
         // GstPlay seeks back to the start when paused after the end of the
         // stream, so the element would show its first frame. The element
         // pauses itself at the end and must keep showing its last frame.
@@ -462,9 +514,14 @@ impl PlayerInner {
         let time = time * 1_000_000_000.;
         let origin = self.origin.lock().unwrap().time();
         // A pause at the end left the pipeline playing: pause it now, so the
-        // seek leaves the element paused.
-        if self.eos.swap(false, Ordering::Relaxed) && self.paused.get() {
-            self.player.pause();
+        // seek leaves the element paused. A seek at the end while playing is
+        // a loop: the next pass follows on from this one.
+        if self.eos.swap(false, Ordering::Relaxed) {
+            if self.paused.get() {
+                self.player.pause();
+            } else {
+                self.alignment.follow_on();
+            }
         }
         self.player
             .seek(gstreamer::ClockTime::from_nseconds(time as u64) + origin);
@@ -819,7 +876,15 @@ impl GStreamerPlayer {
                             .zip(audio_sink.base_time())
                             .map(|(running, base)| {
                                 let at = base.nseconds() + running.nseconds();
-                                audio_alignment.place(base.nseconds(), at, at, false)
+                                let duration = buffer.duration().map_or_else(
+                                    || {
+                                        let frames = buffer.size() as u64 /
+                                            audio_info.bpf().max(1) as u64;
+                                        frames * 1_000_000_000 / audio_info.rate().max(1) as u64
+                                    },
+                                    |d| d.nseconds(),
+                                );
+                                audio_alignment.place(base.nseconds(), at, at, false, duration)
                             });
                         let map = buffer
                             .into_mapped_buffer_readable()
@@ -908,6 +973,7 @@ impl GStreamerPlayer {
             enough_data: Arc::new(AtomicBool::new(false)),
             origin: origin.clone(),
             eos: eos.clone(),
+            alignment: alignment.clone(),
         })));
 
         let inner = self.inner.borrow();
@@ -1064,6 +1130,7 @@ impl GStreamerPlayer {
             // When a sample is meant to be shown: pipeline base time plus its
             // running time, on the system (monotonic) clock, placed on the
             // host's cycle grid.
+            let preroll_alignment = alignment.clone();
             let present_at = move |sink: &gstreamer_app::AppSink, sample: &gstreamer::Sample| {
                 let buffer = sample.buffer()?;
                 let running = running_time(sample, buffer.pts())?;
@@ -1071,7 +1138,8 @@ impl GStreamerPlayer {
                 let at = base + running.nseconds();
                 let natural = natural_start(sample, buffer)
                     .map_or(at, |start| base.saturating_add_signed(start));
-                Some(alignment.place(base, at, natural, true))
+                let duration = frame_duration(sample, buffer).unwrap_or(0);
+                Some(alignment.place(base, at, natural, true, duration))
             };
 
             // Set video_sink callbacks.
@@ -1080,10 +1148,19 @@ impl GStreamerPlayer {
                     .new_preroll({
                         let render_sample = render_sample.clone();
                         let present_at = present_at.clone();
+                        let preroll_alignment = preroll_alignment.clone();
                         move |video_sink| {
                             let sample = video_sink
                                 .pull_preroll()
                                 .map_err(|_| gstreamer::FlowError::Eos)?;
+                            // Prerolled while playing (a seek or a loop): the
+                            // sink hands the frame again as the new run's
+                            // first sample, on its time. Shown now, on the
+                            // old run's time, it would cut the frames still
+                            // to show before it.
+                            if preroll_alignment.playing.load(Ordering::Relaxed) {
+                                return Ok(gstreamer::FlowSuccess::Ok);
+                            }
                             let at = present_at(video_sink, &sample);
                             render_sample(sample, at)
                         }
@@ -1374,6 +1451,21 @@ fn natural_start(sample: &gstreamer::Sample, buffer: &gstreamer::BufferRef) -> O
         return None;
     }
     Some(end.nseconds() as i64 - den * 1_000_000_000 / num)
+}
+
+/// How long a video frame lasts: its buffer's duration, or one frame at the
+/// stream's frame rate.
+fn frame_duration(sample: &gstreamer::Sample, buffer: &gstreamer::BufferRef) -> Option<u64> {
+    if let Some(duration) = buffer.duration() {
+        return Some(duration.nseconds());
+    }
+    let rate = sample
+        .caps()?
+        .structure(0)?
+        .get::<gstreamer::Fraction>("framerate")
+        .ok()?;
+    let (num, den) = (u64::try_from(rate.numer()).ok()?, u64::try_from(rate.denom()).ok()?);
+    (num > 0).then(|| den * 1_000_000_000 / num)
 }
 
 /// Where a player's media timeline starts.  GStreamer reports positions in

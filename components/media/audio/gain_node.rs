@@ -88,12 +88,12 @@ mod tests {
         let mut node = GainNode::new(GainNodeOptions { gain: 0. }, ChannelInfo::default());
         node.get_param(ParamType::Gain)
             .insert_event(AutomationEvent::SetValueAtTime(1., Tick(300)));
-        for block in 0..4u64 {
+        for block in 0..512 / FRAMES_PER_BLOCK.0 {
             let mut chunk = Chunk::default();
             chunk.blocks.push(Block::default());
             let info = BlockInfo {
                 sample_rate: 48000.,
-                frame: Tick(block * 128),
+                frame: Tick(block * FRAMES_PER_BLOCK.0),
                 time: 0.,
                 media_time: None,
             };

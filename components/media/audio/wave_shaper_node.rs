@@ -182,9 +182,9 @@ impl AudioNodeEngine for WaveShaperNode {
                 );
 
                 debug_assert!(
-                    out_len == 128 * sampling_factor,
+                    out_len == FRAMES_PER_BLOCK_USIZE * sampling_factor,
                     "Expected {} samples in output after upsampling, got: {}",
-                    128 * sampling_factor,
+                    FRAMES_PER_BLOCK_USIZE * sampling_factor,
                     out_len
                 );
 
@@ -198,8 +198,9 @@ impl AudioNodeEngine for WaveShaperNode {
                 );
 
                 debug_assert!(
-                    out_len == 128,
-                    "Expected 128 samples in output after downsampling, got {}",
+                    out_len == FRAMES_PER_BLOCK_USIZE,
+                    "Expected {} samples in output after downsampling, got {}",
+                    FRAMES_PER_BLOCK_USIZE,
                     out_len
                 );
             }

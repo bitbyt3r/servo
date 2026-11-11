@@ -773,11 +773,12 @@ mod tests {
         }
     }
 
-    /// The param's value on each tick of `range` (one block per 128 ticks).
+    /// The param's value on each tick of `range` (one block per
+    /// FRAMES_PER_BLOCK ticks).
     fn run(param: &mut Param, range: std::ops::Range<u64>) -> Vec<f32> {
         range
             .map(|t| {
-                let block = t - t % 128;
+                let block = t - t % crate::block::FRAMES_PER_BLOCK.0;
                 param.update(&info(block), Tick(t - block));
                 param.value()
             })

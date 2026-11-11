@@ -14,9 +14,15 @@ use smallvec::{SmallVec, smallvec};
 use crate::audio_node::ChannelInterpretation;
 use crate::graph::{PortIndex, PortKind};
 
-// defined by spec
-// https://webaudio.github.io/web-audio-api/#render-quantum
-pub const FRAMES_PER_BLOCK: Tick = Tick(128);
+// The spec's render quantum is 128 frames
+// (https://webaudio.github.io/web-audio-api/#render-quantum). This fork
+// renders 32: bops-web takes a page's audio a graph cycle at a time, and a
+// cycle (800 frames at 48 kHz and 60 fps; 1600 at 30, 960 at 50, 1920 at
+// 25) is a whole number of 32-frame blocks but not of 128-frame ones. With
+// 128, the block that ends one cycle also starts the next, so up to 96
+// frames of a cycle were rendered before the cycle before it was sent,
+// before the page could act on a change that lands on it.
+pub const FRAMES_PER_BLOCK: Tick = Tick(32);
 pub const FRAMES_PER_BLOCK_USIZE: usize = FRAMES_PER_BLOCK.0 as usize;
 
 /// A tick, i.e. the time taken for a single frame

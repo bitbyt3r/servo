@@ -30,6 +30,10 @@ struct Delivered {
     anchor: Option<(u64, i64)>,
     /// The context's sample rate, once a block has been rendered.
     rate: Option<f32>,
+    /// The index of the first sample of the newest timeline and when it
+    /// came, until a block reaches it: to say whether a start (a play, a
+    /// seek, a loop) came in time to be heard from its first sample.
+    started: Option<(i64, std::time::Instant)>,
 }
 
 /// A delivery whose time is this far from where the samples before it put
@@ -82,6 +86,9 @@ impl MediaElementSourceNode {
             buffer.drain(..drain);
         }
         if let Some((_, index)) = delivered.anchor.as_mut() {
+            *index -= drain as i64;
+        }
+        if let Some((index, _)) = delivered.started.as_mut() {
             *index -= drain as i64;
         }
         self.playback_offset -= drain;
@@ -146,6 +153,24 @@ impl AudioNodeEngine for MediaElementSourceNode {
         };
         let block = Self::block_from(&delivered, start, FRAMES_PER_BLOCK_USIZE);
         inputs.blocks.push(block);
+        // The block that reaches the start of a timeline says whether its
+        // first sample came before it was due here.
+        if let Some((first, came)) = delivered.started &&
+            start + FRAMES_PER_BLOCK_USIZE as i64 > first
+        {
+            delivered.started = None;
+            if start > first {
+                log::warn!(
+                    "media: the first {} samples of a start came after their time and were skipped",
+                    start - first
+                );
+            } else {
+                log::info!(
+                    "media: a start's first sample was rendered {:.1} ms after it came",
+                    came.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
         self.playback_offset = (start + FRAMES_PER_BLOCK_USIZE as i64).max(0) as usize;
         inputs
     }
@@ -199,6 +224,7 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
             };
             if !follows {
                 delivered.anchor = Some((present_at, index));
+                delivered.started = Some((index, std::time::Instant::now()));
             }
         }
         delivered.channels[channel - 1].extend_from_slice((*sample).as_ref());
