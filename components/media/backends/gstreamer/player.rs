@@ -850,12 +850,15 @@ impl GStreamerPlayer {
             pipeline.set_property("audio-sink", &audio_sink);
 
             let audio_sink = audio_sink.dynamic_cast::<gstreamer_app::AppSink>().unwrap();
-            // The renderer wants f32 samples, one slice per channel; let the
-            // pipeline convert whatever the decoder produces.
+            // The renderer wants f32 samples, one slice per channel, at its
+            // own rate if it has one (a WebAudio context's); let the
+            // pipeline convert and resample whatever the decoder produces.
+            let rate = audio_renderer.lock().unwrap().sample_rate();
             audio_sink.set_caps(Some(
                 &gstreamer_audio::AudioCapsBuilder::new()
                     .format(gstreamer_audio::AUDIO_FORMAT_F32)
                     .layout(gstreamer_audio::AudioLayout::Interleaved)
+                    .rate_if_some(rate.and_then(|rate| i32::try_from(rate).ok()))
                     .build(),
             ));
 

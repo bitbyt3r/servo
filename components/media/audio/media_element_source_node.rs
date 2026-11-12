@@ -55,10 +55,11 @@ pub(crate) struct MediaElementSourceNode {
 const TRIM_AFTER: usize = 48_000;
 
 impl MediaElementSourceNode {
-    pub fn new(channel_info: ChannelInfo) -> Self {
+    pub fn new(channel_info: ChannelInfo, sample_rate: f32) -> Self {
         let delivered = Arc::new(Mutex::new(Delivered::default()));
         let renderer = Arc::new(Mutex::new(MediaElementSourceNodeRenderer::new(
             delivered.clone(),
+            sample_rate,
         )));
         Self {
             channel_info,
@@ -185,13 +186,17 @@ impl AudioNodeEngine for MediaElementSourceNode {
 struct MediaElementSourceNodeRenderer {
     delivered: Arc<Mutex<Delivered>>,
     channels: HashMap<u32, usize>,
+    /// The context's sample rate. The node plays one delivered sample per
+    /// frame of the context, so samples must come at this rate.
+    sample_rate: f32,
 }
 
 impl MediaElementSourceNodeRenderer {
-    pub fn new(delivered: Arc<Mutex<Delivered>>) -> Self {
+    pub fn new(delivered: Arc<Mutex<Delivered>>, sample_rate: f32) -> Self {
         Self {
             delivered,
             channels: HashMap::new(),
+            sample_rate,
         }
     }
 }
@@ -228,5 +233,9 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
             }
         }
         delivered.channels[channel - 1].extend_from_slice((*sample).as_ref());
+    }
+
+    fn sample_rate(&self) -> Option<u32> {
+        Some(self.sample_rate.round() as u32)
     }
 }

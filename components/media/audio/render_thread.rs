@@ -259,7 +259,9 @@ impl AudioRenderThread {
             },
             AudioNodeInit::ChannelSplitterNode => Box::new(ChannelSplitterNode::new(ch)),
             AudioNodeInit::WaveShaperNode(options) => Box::new(WaveShaperNode::new(options, ch)),
-            AudioNodeInit::MediaElementSourceNode => Box::new(MediaElementSourceNode::new(ch)),
+            AudioNodeInit::MediaElementSourceNode => {
+                Box::new(MediaElementSourceNode::new(ch, self.sample_rate))
+            },
             AudioNodeInit::IIRFilterNode(options) => Box::new(IIRFilterNode::new(options, ch)),
             _ => unimplemented!(),
         };
