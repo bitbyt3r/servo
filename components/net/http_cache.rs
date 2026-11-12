@@ -22,7 +22,7 @@ use log::{debug, error, info};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::http_status::HttpStatus;
-use net_traits::request::{CacheMode, Request};
+use net_traits::request::{CacheMode, Destination, Request};
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{CacheEntryDescriptor, Metadata, ResourceFetchTiming};
 use parking_lot::{Mutex as ParkingLotMutex, RwLock as ParkingLotRwLock};
@@ -1163,6 +1163,15 @@ impl HttpCache {
     }
 }
 
+/// Whether a response to `request` is only passed on, chunk by chunk, and
+/// its body is not also kept whole. Media elements read their responses
+/// that way, and a stream that never ends would otherwise keep every byte.
+/// A request with integrity metadata needs the whole body to check it.
+pub(crate) fn body_is_only_streamed(request: &Request) -> bool {
+    matches!(request.destination, Destination::Audio | Destination::Video) &&
+        request.integrity_metadata.is_empty()
+}
+
 /// Returns an writeable entry into the cache or a guard for insertint an entry
 /// The guard will block other queries to the cache entry in both cases.
 pub enum CachedResourcesOrGuard<'a> {
@@ -1181,6 +1190,10 @@ impl<'a> CachedResourcesOrGuard<'a> {
 
         if request.method != Method::GET {
             // Only Get requests are cached.
+            return;
+        }
+        if body_is_only_streamed(request) {
+            // Its body is never kept, so there is nothing to cache.
             return;
         }
         if request.headers.contains_key(header::AUTHORIZATION) {

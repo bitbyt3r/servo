@@ -2356,6 +2356,7 @@ async fn http_network_fetch(
     response.referrer_policy = request.referrer_policy;
 
     let response_body = response.body.clone();
+    let keep_body = !crate::http_cache::body_is_only_streamed(request);
 
     // We're about to spawn a future to be waited on here
     let (done_sender, done_receiver) = unbounded_channel();
@@ -2409,7 +2410,8 @@ async fn http_network_fetch(
     }
     .min(pref!(network_max_content_length) as usize);
     let _ = done_sender.send(Data::ContentLength(prealloc_size));
-    *response_body.lock() = ResponseBody::Receiving(Vec::with_capacity(prealloc_size));
+    let capacity = if keep_body { prealloc_size } else { 0 };
+    *response_body.lock() = ResponseBody::Receiving(Vec::with_capacity(capacity));
     let response_body2 = response_body.clone();
 
     spawn_task(
@@ -2425,7 +2427,9 @@ async fn http_network_fetch(
                     )));
                 }
                 if let ResponseBody::Receiving(ref mut body) = *response_body_accumulator.lock() {
-                    body.extend_from_slice(&chunk);
+                    if keep_body {
+                        body.extend_from_slice(&chunk);
+                    }
                     let _ = done_sender.send(Data::Payload(chunk));
                 }
                 future::ready(Ok(response_body_accumulator))
