@@ -45,7 +45,7 @@ on:
 
 jobs:
   win:
-    if: ${{ inputs.workflow == 'windows' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'windows') }}
     name: Windows
     uses: ./.github/workflows/windows.yml
     secrets: inherit
@@ -58,7 +58,7 @@ jobs:
       capi: ${{ inputs.capi }}
 
   macos:
-    if: ${{ inputs.workflow == 'macos' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'macos') }}
     name: MacOS
     uses: ./.github/workflows/mac.yml
     secrets: inherit
@@ -73,7 +73,7 @@ jobs:
       capi: ${{ inputs.capi }}
 
   macos-arm64:
-    if: ${{ inputs.workflow == 'macos-arm64' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'macos-arm64') }}
     name: MacOS
     uses: ./.github/workflows/mac-arm64.yml
     secrets: inherit
@@ -88,7 +88,7 @@ jobs:
       capi: ${{ inputs.capi }}
 
   linux:
-    if: ${{ inputs.workflow == 'linux' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'linux') }}
     name: Linux
     uses: ./.github/workflows/linux.yml
     secrets: inherit
@@ -106,7 +106,7 @@ jobs:
       capi: ${{ inputs.capi }}
 
   linux-arm64:
-    if: ${{ inputs.workflow == 'linux-arm64' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'linux-arm64') }}
     name: Linux (arm64)
     uses: ./.github/workflows/linux-arm64.yml
     secrets: inherit
@@ -124,13 +124,13 @@ jobs:
       capi: ${{ inputs.capi }}
 
   lint:
-    if: ${{ inputs.workflow == 'lint' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'lint') }}
     name: Lint
     # Note: The lint workflow does not need access to any secrets.
     uses: ./.github/workflows/lint.yml
 
   perf-analysis:
-    if: ${{ inputs.workflow == 'perf-analysis' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'perf-analysis') }}
     name: Perf analysis
     uses: ./.github/workflows/perf-analysis.yml
     secrets: inherit
@@ -139,7 +139,7 @@ jobs:
       build-args: ${{ inputs.build-args }}
 
   android:
-    if: ${{ inputs.workflow == 'android' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'android') }}
     name: Android
     uses: ./.github/workflows/android.yml
     secrets: inherit
@@ -148,7 +148,7 @@ jobs:
       bencher: ${{ inputs.bencher }}
 
   ohos:
-    if: ${{ inputs.workflow == 'ohos' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.workflow == 'ohos') }}
     name: OpenHarmony
     uses: ./.github/workflows/ohos.yml
     secrets: inherit

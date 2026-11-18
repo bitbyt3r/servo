@@ -16,6 +16,7 @@ on:
 jobs:
   decision:
     name: Generate Try Configuration
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-22.04
     outputs:
       configuration: ${{ steps.configuration.outputs.result }}
@@ -41,6 +42,7 @@ jobs:
            } >> $GITHUB_OUTPUT
 
   build:
+    if: github.repository == 'servo/servo'
     needs: ["decision"]
     name: ${{ matrix.name }}
     strategy:
@@ -67,7 +69,7 @@ jobs:
   build-result:
     name: Result
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ github.repository == 'servo/servo' && (always()) }}
     # needs all build to detect cancellation
     needs:
       - build

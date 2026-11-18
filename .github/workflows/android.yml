@@ -36,6 +36,7 @@ env:
 jobs:
   build:
     name: Android Build
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-22.04
     outputs:
       artifact_ids: ${{ steps.artifact_ids.outputs.artifact_ids }}
@@ -156,7 +157,7 @@ jobs:
     strategy:
       matrix:
         target: ['aarch64-linux-android', 'armv7-linux-androideabi', 'x86_64-linux-android']
-    if: ${{ inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group') }}
     name: 'Bencher (${{ matrix.target }})'
     uses: ./.github/workflows/bencher.yml
     with:

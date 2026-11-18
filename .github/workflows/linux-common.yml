@@ -80,6 +80,7 @@ env:
 
 jobs:
   runner-select:
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-24.04
     outputs:
       unique-id: ${{ steps.select.outputs.unique-id }}
@@ -102,6 +103,7 @@ jobs:
           force-github-hosted-runner: ${{ inputs.force-github-hosted-runner }}
 
   build:
+    if: github.repository == 'servo/servo'
     needs:
       - runner-select
     name: Linux Build (${{ inputs.arch }}) [${{ needs.runner-select.outputs.unique-id }}]
@@ -250,7 +252,7 @@ jobs:
           echo "artifact_ids=${{steps.upload-tarball.outputs.artifact-id}}" >> $GITHUB_OUTPUT
 
   build-libservo:
-    if: ${{ inputs.build-libservo }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.build-libservo) }}
     name: Build libservo and MSRV check (${{ inputs.arch }})
     runs-on: ${{ inputs.github-runner-label }}
     steps:
@@ -292,7 +294,7 @@ jobs:
           cargo +${{ steps.msrv.outputs.rust_version }} build -p servo --locked
 
   capi:
-    if: ${{ inputs.capi }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.capi) }}
     name: Build and test Servo's C API (${{ inputs.arch }})
     runs-on: ${{ inputs.github-runner-label }}
     steps:

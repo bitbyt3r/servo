@@ -112,6 +112,7 @@ env:
 jobs:
   common:
     name: Call common Linux workflow for x86_64
+    if: github.repository == 'servo/servo'
     uses: ./.github/workflows/linux-common.yml
     secrets: inherit
     with:
@@ -137,7 +138,7 @@ jobs:
       perf-analysis: ${{ inputs.bencher && inputs.profile == 'checked-release' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
 
   wpt-2020:
-    if: ${{ inputs.wpt }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.wpt) }}
     name: Linux WPT
     needs: ["common"]
     uses: ./.github/workflows/linux-wpt.yml
@@ -151,13 +152,7 @@ jobs:
 
   bencher:
     needs: ["common"]
-    if: >-
-      ${{
-          inputs.bencher &&
-          inputs.profile != 'debug' &&
-          github.event_name != 'workflow_dispatch' &&
-          github.event_name != 'merge_group'
-      }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group') }}
     uses: ./.github/workflows/bencher.yml
     with:
       target: "linux"
@@ -174,7 +169,7 @@ jobs:
 
   # Runs the underlying job (“workload”) on a self-hosted runner if available.
   runner-select-coverage:
-    if: inputs.coverage
+    if: ${{ github.repository == 'servo/servo' && (inputs.coverage) }}
     runs-on: ubuntu-24.04
     outputs:
       unique-id: ${{ steps.select.outputs.unique-id }}
@@ -199,7 +194,7 @@ jobs:
           force-github-hosted-runner: ${{ inputs.force-github-hosted-runner }}
 
   unit-test-coverage:
-    if: inputs.coverage
+    if: ${{ github.repository == 'servo/servo' && (inputs.coverage) }}
     needs: runner-select-coverage
     name: Unit Test Coverage [${{ needs.runner-select-coverage.outputs.unique-id }}]
     runs-on: ${{ needs.runner-select-coverage.outputs.selected-runner-label }}
@@ -257,7 +252,7 @@ jobs:
 
   media-examples:
     name: Media Examples
-    if: ${{ inputs.unit-tests }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.unit-tests) }}
     runs-on: ubuntu-22.04
     steps:
       - uses: servo/ci-runners/actions/checkout@b42c96524cdd72126255602c69c4ad649c750ebf

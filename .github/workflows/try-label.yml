@@ -7,6 +7,7 @@ on:
 jobs:
   parse-comment:
     name: Trigger Try
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -115,7 +116,7 @@ jobs:
              + config.matrix.map(m => m.name).join(", "));
 
   run-try:
-    if: ${{ needs.parse-comment.outputs.try_string }}
+    if: ${{ github.repository == 'servo/servo' && (needs.parse-comment.outputs.try_string) }}
     needs: ["parse-comment"]
     name: ${{ matrix.name }}
     permissions:
@@ -156,7 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-    if: ${{ always() && needs.parse-comment.outputs.try_string }}
+    if: ${{ github.repository == 'servo/servo' && (always() && needs.parse-comment.outputs.try_string) }}
     steps:
       - name: Post PR Comment with results
         env:

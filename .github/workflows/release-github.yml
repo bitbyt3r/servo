@@ -25,7 +25,7 @@ env:
 jobs:
   create-draft-release:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Create Draft GH Release
     runs-on: ubuntu-latest
     environment: &publish-environment
@@ -76,10 +76,7 @@ jobs:
 
   publish-nightly-release:
     # We only auto-publish nightly releases, so we do not use this job for regular releases.
-    if: |
-      always() 
-        && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch')
-        && (inputs.regular_release || false) == false
+    if: ${{ github.repository == 'servo/servo' && (always() && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') && (inputs.regular_release || false) == false) }}
     name: Publish GH Release
     runs-on: ubuntu-latest
     environment: *publish-environment
@@ -127,7 +124,7 @@ jobs:
 
   build-win:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (Windows)
     uses: ./.github/workflows/windows.yml
     with:
@@ -137,7 +134,7 @@ jobs:
 
   upload-vendored-source:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Upload vendored source archive
     runs-on: ubuntu-latest
     environment: *publish-environment
@@ -172,11 +169,7 @@ jobs:
   upload-artifacts-nightly:
     # Only run scheduled nightly builds on upstream servo.
     # Partial failures of the build jobs are accepted for nightly.
-    if: |
-      !cancelled() 
-        && needs.create-draft-release.result == 'success'
-        && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch')
-        && (inputs.regular_release || false) == false
+    if: ${{ github.repository == 'servo/servo' && (!cancelled() && needs.create-draft-release.result == 'success' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') && (inputs.regular_release || false) == false) }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -251,7 +244,7 @@ jobs:
             release-artifacts/*
 
   upload-artifacts-release:
-    if: github.event_name == 'workflow_dispatch' && inputs.regular_release
+    if: ${{ github.repository == 'servo/servo' && (github.event_name == 'workflow_dispatch' && inputs.regular_release) }}
     runs-on: ubuntu-latest
     environment: *publish-environment
     permissions:
@@ -273,7 +266,7 @@ jobs:
 
   build-mac:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (macOS)
     uses: ./.github/workflows/mac.yml
     with:
@@ -282,7 +275,7 @@ jobs:
 
   build-mac-arm64:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (macOS Arm64)
     uses: ./.github/workflows/mac-arm64.yml
     with:
@@ -291,7 +284,7 @@ jobs:
 
   build-linux:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (Linux)
     uses: ./.github/workflows/linux.yml
     with:
@@ -300,7 +293,7 @@ jobs:
 
   build-linux-arm64:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (Linux Arm64)
     uses: ./.github/workflows/linux-arm64.yml
     with:
@@ -309,7 +302,7 @@ jobs:
 
   build-android:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build release (Android)
     uses: ./.github/workflows/android.yml
     with:
@@ -318,7 +311,7 @@ jobs:
 
   build-ohos:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (OpenHarmony)
     uses: ./.github/workflows/ohos.yml
     with:

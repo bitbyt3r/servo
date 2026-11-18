@@ -11,7 +11,7 @@ on:
 jobs:
   linux:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Linux
     uses: ./.github/workflows/linux.yml
     with:
@@ -21,7 +21,7 @@ jobs:
 
   sync:
     # This job is only useful when run on upstream servo.
-    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Synchronize WPT Nightly
     runs-on: ubuntu-22.04
     needs:

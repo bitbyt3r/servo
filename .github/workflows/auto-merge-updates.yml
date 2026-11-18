@@ -7,7 +7,7 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: ${{ github.actor == 'dependabot[bot]' || github.actor == 'servo-wpt-sync' }}
+    if: ${{ github.repository == 'servo/servo' && (github.actor == 'dependabot[bot]' || github.actor == 'servo-wpt-sync') }}
     steps:
       - name: Approve the PR & enable auto-merge
         run: |

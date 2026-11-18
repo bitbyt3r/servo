@@ -90,6 +90,7 @@ env:
 jobs:
   build:
     name: MacOS 15 Build
+    if: github.repository == 'servo/servo'
     runs-on: macos-15
     outputs:
       artifact_ids: ${{ steps.artifact_ids.outputs.artifact_ids }}
@@ -196,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   wpt-2020:
-    if: ${{ inputs.wpt }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.wpt) }}
     name: MacOS WPT
     needs: ["build"]
     uses: ./.github/workflows/mac-wpt.yml
@@ -208,7 +209,7 @@ jobs:
 
   bencher:
     needs: ["build"]
-    if: ${{ inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group') }}
     uses: ./.github/workflows/bencher.yml
     with:
       target: "macos-arm64"
@@ -221,7 +222,7 @@ jobs:
     secrets: inherit
 
   build-libservo:
-    if: ${{ inputs.build-libservo }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.build-libservo) }}
     name: Build libservo and MSRV check
     runs-on: macos-15
     steps:
@@ -240,7 +241,7 @@ jobs:
           cargo +${{ steps.msrv.outputs.rust_version }} build -p servo --locked
 
   capi:
-    if: ${{ inputs.capi }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.capi) }}
     name: Build and test Servo's C API
     runs-on: macos-15
     steps:

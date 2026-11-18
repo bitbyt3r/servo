@@ -112,6 +112,7 @@ env:
 jobs:
   linux-arm64:
     name: Call common linux workflow for arm64
+    if: github.repository == 'servo/servo'
     uses: ./.github/workflows/linux-common.yml
     secrets: inherit
     with:

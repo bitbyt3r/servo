@@ -78,6 +78,7 @@ jobs:
   # Runs the underlying job (“workload”) on a self-hosted runner if available,
   # with the help of a `runner-select` job and a `runner-timeout` job.
   runner-select:
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-24.04
     outputs:
       unique-id: ${{ steps.select.outputs.unique-id }}
@@ -100,6 +101,7 @@ jobs:
           force-github-hosted-runner: ${{ inputs.force-github-hosted-runner }}
 
   build:
+    if: github.repository == 'servo/servo'
     needs:
       - runner-select
     name: Windows Build [${{ needs.runner-select.outputs.unique-id }}]
@@ -265,7 +267,7 @@ jobs:
 
   bencher:
     needs: ["build"]
-    if: ${{ inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group' }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.bencher && inputs.profile != 'debug' && github.event_name != 'workflow_dispatch' && github.event_name != 'merge_group') }}
     uses: ./.github/workflows/bencher.yml
     with:
       target: 'windows'
@@ -278,7 +280,7 @@ jobs:
     secrets: inherit
 
   build-libservo:
-    if: ${{ inputs.build-libservo }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.build-libservo) }}
     name: Build libservo and MSRV check
     runs-on: windows-2022
     steps:
@@ -308,7 +310,7 @@ jobs:
           cargo +${{ steps.msrv.outputs.rust_version }} build -p servo --locked
 
   capi:
-    if: ${{ inputs.capi }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.capi) }}
     name: Build and test Servo's C API
     runs-on: windows-2022
     steps:
