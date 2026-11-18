@@ -105,6 +105,17 @@ jobs:
     if: github.repository == 'servo/servo'
     needs: ["decision"]
     name: ${{ matrix.name }}
+    permissions:
+      contents: read
+      attestations: read
+      # TODO: This is used by our runner-selection job to delete temporary artifacts.
+      # We should find a nother way to handle that to avoid needing to hand-out this
+      # permission.
+      actions: write
+      # The following two are used by the code that uploads a comment and check run
+      # when processing WPT results.
+      checks: write
+      pull-requests: write
     strategy:
       fail-fast: ${{ fromJson(needs.decision.outputs.configuration).fail_fast }}
       matrix:

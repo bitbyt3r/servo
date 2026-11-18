@@ -313,6 +313,9 @@ jobs:
     # This job is only useful when run on upstream servo.
     if: ${{ github.repository == 'servo/servo' && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch') }}
     name: Build production release (OpenHarmony)
+    permissions:
+      contents: read
+      attestations: read
     uses: ./.github/workflows/ohos.yml
     with:
       profile: "production"
