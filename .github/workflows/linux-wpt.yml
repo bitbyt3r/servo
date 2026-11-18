@@ -35,6 +35,7 @@ jobs:
   # Runs the underlying job (“workload”) on a self-hosted runner if available,
   # with the help of a `runner-select` job and a `runner-timeout` job.
   runner-select:
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-24.04
     outputs:
       unique-id: ${{ steps.select.outputs.unique-id }}
@@ -63,6 +64,7 @@ jobs:
           # Any other boolean conditions that disable self-hosted runners go here.
           force-github-hosted-runner: true
   linux-wpt:
+    if: github.repository == 'servo/servo'
     needs:
       - runner-select
     name: WPT [${{ needs.runner-select.outputs.unique-id }}]
@@ -138,7 +140,7 @@ jobs:
   report-test-results:
     name: Process WPT Results
     runs-on: ubuntu-latest
-    if: ${{ always() }}
+    if: ${{ github.repository == 'servo/servo' && (always()) }}
     needs: linux-wpt
     steps:
       - name: Merge logs (full)

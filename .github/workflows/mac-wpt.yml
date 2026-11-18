@@ -22,6 +22,7 @@ env:
 jobs:
   mac-wpt:
     name: WPT
+    if: github.repository == 'servo/servo'
     runs-on: ${{ inputs.arm && 'macos-15' || 'macos-15-intel' }}
     env:
       max_chunk_id: 5
@@ -72,7 +73,7 @@ jobs:
   report-test-results:
     name: Process WPT Results
     runs-on: ubuntu-latest
-    if: ${{ always() }}
+    if: ${{ github.repository == 'servo/servo' && (always()) }}
     needs: mac-wpt
     steps:
       - name: Merge logs (filtered)

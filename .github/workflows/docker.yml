@@ -27,6 +27,7 @@ env:
 
 jobs:
   devcontainer_ubuntu_build:
+    if: github.repository == 'servo/servo'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -73,7 +74,7 @@ jobs:
     needs:
       - devcontainer_ubuntu_build
     # Use manual workflow dispatch in your fork to test changes.
-    if: (github.event_name == 'push' && github.repository_owner == 'servo') || github.event_name == 'workflow_dispatch'
+    if: ${{ github.repository == 'servo/servo' && ((github.event_name == 'push' && github.repository_owner == 'servo') || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
       packages: write

@@ -53,6 +53,7 @@ jobs:
   # Runs the underlying job (“workload”) on a self-hosted runner if available,
   # with the help of a `runner-select` job and a `runner-timeout` job.
   runner-select:
+    if: github.repository == 'servo/servo'
     runs-on: ubuntu-24.04
     outputs:
       unique-id: ${{ steps.select.outputs.unique-id }}
@@ -76,6 +77,7 @@ jobs:
           force-github-hosted-runner: ${{ !(inputs.speedometer || inputs.dromaeo) || inputs.force-github-hosted-runner }}
 
   bencher:
+    if: github.repository == 'servo/servo'
     needs:
       - runner-select
     name: Bencher (${{ inputs.target }}) [${{ needs.runner-select.outputs.unique-id }}]
@@ -172,7 +174,7 @@ jobs:
 
   # Runs the page-load benchmark using servo/perf-analysis-tools.
   perf-analysis:
-    if: ${{ inputs.perf-analysis }}
+    if: ${{ github.repository == 'servo/servo' && (inputs.perf-analysis) }}
     name: Perf analysis
     uses: ./.github/workflows/perf-analysis.yml
     secrets: inherit
