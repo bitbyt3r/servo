@@ -34,6 +34,9 @@ struct Delivered {
     /// came, until a block reaches it: to say whether a start (a play, a
     /// seek, a loop) came in time to be heard from its first sample.
     started: Option<(i64, std::time::Instant)>,
+    /// The next delivery starts a new run (see `AudioRenderer::start_run`):
+    /// it anchors a timeline of its own.
+    new_run: bool,
 }
 
 /// A delivery whose time is this far from where the samples before it put
@@ -55,6 +58,8 @@ pub(crate) struct MediaElementSourceNode {
     /// while playing the first of those were heard already, on the timeline
     /// before: none is heard twice.
     rendered: i64,
+    /// The last block left samples heard already silent: said once.
+    skipping: bool,
 }
 
 /// Played samples are freed once this many have accumulated.
@@ -73,6 +78,7 @@ impl MediaElementSourceNode {
             delivered,
             playback_offset: 0,
             rendered: 0,
+            skipping: false,
         }
     }
 
@@ -155,8 +161,7 @@ impl AudioNodeEngine for MediaElementSourceNode {
             // samples are skipped, early ones waited for, so the audio stays
             // with its video through stalls and codec block sizes alike.
             (Some(media_time), Some((anchor_time, anchor_index))) => {
-                let offset =
-                    (media_time as f64 - anchor_time as f64) * info.sample_rate as f64 / 1e9;
+                let offset = (media_time as f64 - anchor_time as f64) * info.sample_rate as f64 / 1e9;
                 anchor_index + offset.round() as i64
             },
             // Otherwise play what was delivered, in order.
@@ -168,19 +173,19 @@ impl AudioNodeEngine for MediaElementSourceNode {
         // A start placed before what was rendered already (on resuming, the
         // samples delivered ahead of the pause, the first of which were heard
         // before it) leaves those silent rather than repeat them.
-        if start < self.playback_offset as i64 && self.rendered > start.max(0) {
+        let skipping = self.rendered > start.max(0);
+        if skipping && !std::mem::replace(&mut self.skipping, true) {
             log::info!(
                 "media: a start placed {} samples heard before it ahead of it; they are not repeated",
                 self.rendered - start.max(0)
             );
         }
-        self.rendered = self
-            .rendered
-            .max(end.min(delivered.channels[0].len() as i64));
+        self.skipping = skipping;
+        self.rendered = self.rendered.max(end.min(delivered.channels[0].len() as i64));
         // The block that reaches the start of a timeline says whether its
         // first sample came before it was due here.
-        if let Some((first, came)) = delivered.started
-            && start + FRAMES_PER_BLOCK_USIZE as i64 > first
+        if let Some((first, came)) = delivered.started &&
+            start + FRAMES_PER_BLOCK_USIZE as i64 > first
         {
             delivered.started = None;
             if start > first {
@@ -238,18 +243,20 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
         // that does not follow on from the ones before it. Samples delivered
         // before a new anchor stay just ahead of it: after a pause they are
         // the ones that come next.
-        if channel == 1
-            && let Some(present_at) = present_at
+        if channel == 1 &&
+            let Some(present_at) = present_at
         {
             let index = delivered.channels[0].len() as i64;
-            let follows = match (delivered.anchor, delivered.rate) {
-                (Some((time, at)), Some(rate)) => {
-                    let expected = time as f64 + (index - at) as f64 * 1e9 / rate as f64;
-                    (present_at as f64 - expected).abs() <= NEW_TIMELINE_NS
-                },
-                (Some(_), None) => true,
-                (None, _) => false,
-            };
+            let new_run = std::mem::take(&mut delivered.new_run);
+            let follows = !new_run &&
+                match (delivered.anchor, delivered.rate) {
+                    (Some((time, at)), Some(rate)) => {
+                        let expected = time as f64 + (index - at) as f64 * 1e9 / rate as f64;
+                        (present_at as f64 - expected).abs() <= NEW_TIMELINE_NS
+                    },
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
             if !follows {
                 delivered.anchor = Some((present_at, index));
                 delivered.started = Some((index, std::time::Instant::now()));
@@ -260,6 +267,10 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
 
     fn sample_rate(&self) -> Option<u32> {
         Some(self.sample_rate.round() as u32)
+    }
+
+    fn start_run(&mut self) {
+        self.delivered.lock().unwrap().new_run = true;
     }
 }
 
@@ -350,5 +361,41 @@ mod tests {
             "samples out of order or missing"
         );
         assert_eq!(samples.first(), Some(&1));
+    }
+
+    /// A seek whose new run the player places 32 samples after where the
+    /// run before would have put it (one 256-sample codec block on an
+    /// 800-sample cycle can do that): the new run is placed by its own
+    /// time, not taken for the samples that follow on.
+    #[test]
+    fn a_new_run_near_the_old_timeline_is_placed_by_its_own_time() {
+        let mut node = MediaElementSourceNode::new(ChannelInfo::default(), RATE);
+        let t0 = 1_000_000_000_000u64;
+        let block = FRAMES_PER_BLOCK_USIZE as i64;
+        let mut n = 0u64;
+        let mut render = |node: &mut MediaElementSourceNode, time: u64| {
+            let out = node.process(Chunk::default(), &info(n, time));
+            n += 1;
+            heard(&out)
+        };
+        let _ = render(&mut node, at(t0, -10 * block));
+        deliver(&node, 1, 4000, t0);
+        let mut heard_all = Vec::new();
+        for b in 0..100 {
+            heard_all.extend(render(&mut node, at(t0, b * block)));
+        }
+        // The seek: its samples (numbered from 100001) start 32 samples
+        // after where sample 4001 would have been heard.
+        node.renderer.lock().unwrap().start_run();
+        deliver(&node, 100_001, 4000, at(t0, 4000 + 32));
+        for b in 100..200 {
+            heard_all.extend(render(&mut node, at(t0, b * block)));
+        }
+        let first = heard_all.iter().position(|s| *s == 100_001).unwrap();
+        assert_eq!(
+            first,
+            4000 + 32,
+            "the run's first sample is heard at its time"
+        );
     }
 }

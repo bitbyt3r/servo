@@ -865,6 +865,9 @@ impl GStreamerPlayer {
             let weak_audio_renderer = Arc::downgrade(audio_renderer);
             let audio_origin = origin.clone();
             let audio_alignment = alignment.clone();
+            // The base time of the run the last samples belonged to: a new
+            // one (a seek, a loop or a play after a pause) starts a new run.
+            let audio_base = AtomicU64::new(u64::MAX);
 
             audio_sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
@@ -901,6 +904,19 @@ impl GStreamerPlayer {
                                 );
                                 audio_alignment.place(base.nseconds(), at, at, false, duration)
                             });
+                        // The renderer cannot always tell a new run by its time: one
+                        // can land within a few samples of where the run before
+                        // would have put it (a seek's lands a multiple of 32
+                        // samples off it, with 256-sample codec blocks on an
+                        // 800-sample cycle), and would be heard that far off its
+                        // frames. Say so whenever the base time changes or the
+                        // stream does not follow on (a flush, a gap).
+                        let new_base = audio_sink.base_time().is_some_and(|base| {
+                            audio_base.swap(base.nseconds(), Ordering::Relaxed) != base.nseconds()
+                        });
+                        if new_base || buffer.flags().contains(gstreamer::BufferFlags::DISCONT) {
+                            audio_renderer.lock().unwrap().start_run();
+                        }
                         let map = buffer
                             .into_mapped_buffer_readable()
                             .map_err(|_| gstreamer::FlowError::Error)?;
